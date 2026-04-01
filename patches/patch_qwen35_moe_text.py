@@ -224,11 +224,11 @@ def patch_processing_info():
             return 0
         return super().get_max_video_tokens(seq_len, mm_counts)
 
-    def get_image_size_with_most_features(self):
+    def get_image_size_with_most_features(self, **kwargs):
         config = self.get_hf_config()
         if not hasattr(config, "vision_config") or config.vision_config is None:
             return (0, 0)
-        return super().get_image_size_with_most_features()'''
+        return super().get_image_size_with_most_features(**kwargs)'''
 
     if old in content:
         content = content.replace(old, new)

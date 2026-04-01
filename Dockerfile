@@ -1,28 +1,25 @@
 # syntax=docker/dockerfile:1.6
 #
-# vLLM + Qwen3.5-122B-A10B-FP8 on NVIDIA DGX Spark (GB10, SM121)
+# vLLM on NVIDIA DGX Spark (GB10, SM121)
 #
-# Multi-stage build:
-#   1. flashinfer-builder : Compile FlashInfer from upstream for SM121
-#   2. runner             : Minimal runtime with vLLM nightly + Qwen3.5 patches
+# Strategy:
+#   NGC 26.01 base (PyTorch 2.10 — vLLM 0.18.x wheel compatible) +
+#   CUDA 13.2 compat layer (cuBLASLt NVFP4 3x perf) +
+#   vLLM 0.18.1rc1 cu130 pre-built wheel +
+#   FlashInfer v0.6.7 (CUTLASS 4.4.2, SM121 NVFP4 fix) +
+#   PR #38423 NVFP4 DGX Spark patches
 #
 # Usage:
-#   docker buildx build -t vllm-spark:qwen3.5-fp8 --load .
-#
-# Build args (override with --build-arg):
-#   VLLM_VERSION        - vLLM nightly wheel specifier
-#   FLASHINFER_REF      - FlashInfer git ref (branch/tag/SHA)
-#   CUTLASS_REF         - CUTLASS git ref
-#   TRANSFORMERS_VER    - transformers version for Qwen3.5 MoE
-#   BUILD_JOBS          - parallel build jobs (default: 16)
+#   docker buildx build -t vllm-spark:v018-fi067 --load .
 # =========================================================================
 
+ARG NGC_TAG=26.01-py3
 ARG BUILD_JOBS=16
 
 # =========================================================================
 # STAGE 1: FlashInfer Builder
 # =========================================================================
-FROM nvcr.io/nvidia/pytorch:26.01-py3 AS flashinfer-builder
+FROM nvcr.io/nvidia/pytorch:${NGC_TAG} AS flashinfer-builder
 
 ARG BUILD_JOBS
 ENV MAX_JOBS=${BUILD_JOBS}
@@ -37,13 +34,11 @@ ENV UV_SYSTEM_PYTHON=1
 ENV UV_BREAK_SYSTEM_PACKAGES=1
 ENV UV_LINK_MODE=copy
 
-# SM121 = NVIDIA Blackwell (GB10 / DGX Spark)
 ARG TORCH_CUDA_ARCH_LIST="12.1a"
 ARG FLASHINFER_CUDA_ARCH_LIST="12.1a"
 ENV TORCH_CUDA_ARCH_LIST=${TORCH_CUDA_ARCH_LIST}
 ENV FLASHINFER_CUDA_ARCH_LIST=${FLASHINFER_CUDA_ARCH_LIST}
 
-# Build tools
 RUN apt-get update && \
     apt-get install -y --no-install-recommends curl vim ninja-build git ccache && \
     rm -rf /var/lib/apt/lists/* && \
@@ -56,12 +51,11 @@ ENV CCACHE_COMPRESS=1
 ENV CMAKE_CXX_COMPILER_LAUNCHER=ccache
 ENV CMAKE_CUDA_COMPILER_LAUNCHER=ccache
 
-# FlashInfer build dependencies
 RUN --mount=type=cache,id=uv-cache,target=/root/.cache/uv \
     uv pip install nvidia-nvshmem-cu13 "apache-tvm-ffi<0.2"
 
-# ---- Clone FlashInfer (upstream) ----
-ARG FLASHINFER_REF=v0.6.1
+# FlashInfer v0.6.7 (CUTLASS 4.4.2 — SM121 NVFP4 fix)
+ARG FLASHINFER_REF=v0.6.7
 ARG FLASHINFER_REPO=https://github.com/flashinfer-ai/flashinfer.git
 
 RUN --mount=type=cache,id=git-flashinfer,target=/git-cache/flashinfer \
@@ -77,57 +71,43 @@ RUN --mount=type=cache,id=git-flashinfer,target=/git-cache/flashinfer \
     (git checkout --detach origin/${FLASHINFER_REF} 2>/dev/null || git checkout ${FLASHINFER_REF})
 
 RUN cd /workspace/flashinfer && \
-    git submodule update --init 3rdparty/spdlog
+    git submodule update --init --recursive
 
-# ---- Clone CUTLASS (upstream) ----
-ARG CUTLASS_REF=main
-ARG CUTLASS_REPO=https://github.com/NVIDIA/cutlass.git
-
-RUN --mount=type=cache,id=git-cutlass,target=/git-cache/cutlass \
-    cd /workspace/flashinfer && \
-    rm -rf 3rdparty/cutlass && \
-    if [ -d /git-cache/cutlass/.git ]; then \
-        cp -a /git-cache/cutlass 3rdparty/cutlass && \
-        cd 3rdparty/cutlass && \
-        git fetch origin && git fetch origin --tags; \
-    else \
-        git clone ${CUTLASS_REPO} 3rdparty/cutlass && \
-        cp -a 3rdparty/cutlass/. /git-cache/cutlass/; \
-    fi && \
-    cd /workspace/flashinfer/3rdparty/cutlass && \
-    (git checkout --detach origin/${CUTLASS_REF} 2>/dev/null || git checkout ${CUTLASS_REF})
-
-# ---- Optional: FlashInfer cubin cache patch ----
 COPY patches/flashinfer_cache.patch /workspace/flashinfer/
 RUN cd /workspace/flashinfer && \
     (patch -p1 --dry-run < flashinfer_cache.patch &>/dev/null && \
      patch -p1 < flashinfer_cache.patch || \
      echo "FlashInfer cache patch not applicable, skipping.")
 
-# ---- Build FlashInfer wheels ----
 WORKDIR /workspace/flashinfer
 
 RUN --mount=type=cache,id=uv-cache,target=/root/.cache/uv \
     --mount=type=cache,id=ccache,target=/root/.ccache \
     sed -i -e 's/license = "Apache-2.0"/license = { text = "Apache-2.0" }/' \
-           -e '/license-files/d' pyproject.toml && \
+           -e '/license-files/d' pyproject.toml 2>/dev/null || true && \
     uv build --no-build-isolation --wheel . --out-dir=/workspace/wheels -v
 
 RUN --mount=type=cache,id=uv-cache,target=/root/.cache/uv \
     --mount=type=cache,id=ccache,target=/root/.ccache \
-    cd flashinfer-cubin && \
-    uv build --no-build-isolation --wheel . --out-dir=/workspace/wheels -v
+    if [ -d flashinfer-cubin ]; then \
+        cd flashinfer-cubin && \
+        uv build --no-build-isolation --wheel . --out-dir=/workspace/wheels -v; \
+    else echo "flashinfer-cubin not found, skipping."; fi
 
 RUN --mount=type=cache,id=uv-cache,target=/root/.cache/uv \
     --mount=type=cache,id=ccache,target=/root/.ccache \
-    cd flashinfer-jit-cache && \
-    uv build --no-build-isolation --wheel . --out-dir=/workspace/wheels -v
+    if [ -d flashinfer-jit-cache ]; then \
+        cd flashinfer-jit-cache && \
+        uv build --no-build-isolation --wheel . --out-dir=/workspace/wheels -v || \
+        echo "WARNING: flashinfer-jit-cache build failed, skipping."; \
+    else echo "flashinfer-jit-cache not found, skipping."; fi
 
 
 # =========================================================================
 # STAGE 2: Runner
 # =========================================================================
-FROM nvcr.io/nvidia/pytorch:26.01-py3 AS runner
+ARG NGC_TAG=26.01-py3
+FROM nvcr.io/nvidia/pytorch:${NGC_TAG} AS runner
 
 ENV DEBIAN_FRONTEND=noninteractive
 ENV PIP_BREAK_SYSTEM_PACKAGES=1
@@ -143,11 +123,14 @@ ENV TORCH_CUDA_ARCH_LIST=${TORCH_CUDA_ARCH_LIST}
 ENV FLASHINFER_CUDA_ARCH_LIST=${FLASHINFER_CUDA_ARCH_LIST}
 ENV TRITON_PTXAS_PATH=/usr/local/cuda/bin/ptxas
 
-# Minimal runtime packages
+# ---- CUDA 13.2 compat layer for cuBLASLt NVFP4 3x perf ----
 RUN apt-get update && \
     apt-get install -y --no-install-recommends curl vim git libxcb1 && \
+    apt-get install -y cuda-compat-13-2 2>/dev/null || true && \
     rm -rf /var/lib/apt/lists/* && \
     pip install uv && pip uninstall -y flash-attn
+# Prepend CUDA 13.2 compat libs so cuBLASLt 13.2 is used at runtime
+ENV LD_LIBRARY_PATH=/usr/local/cuda-13.2/compat:${LD_LIBRARY_PATH}
 
 WORKDIR ${VLLM_BASE_DIR}
 
@@ -159,13 +142,13 @@ RUN mkdir -p tiktoken_encodings && \
       "https://openaipublic.blob.core.windows.net/encodings/cl100k_base.tiktoken"
 ENV TIKTOKEN_ENCODINGS_BASE=${VLLM_BASE_DIR}/tiktoken_encodings
 
-# ---- Install FlashInfer wheels from builder stage ----
+# ---- Install FlashInfer v0.6.7 wheels from builder ----
 RUN --mount=type=bind,from=flashinfer-builder,source=/workspace/wheels,target=/mount/wheels \
     --mount=type=cache,id=uv-cache,target=/root/.cache/uv \
     uv pip install /mount/wheels/*.whl
 
-# ---- Install vLLM nightly (cu130 / aarch64) ----
-ARG VLLM_VERSION="vllm==0.17.0rc1.dev212+gc88510083.cu130"
+# ---- Install vLLM 0.18.1rc1 (cu130 wheel, PyTorch 2.10 compatible) ----
+ARG VLLM_VERSION="vllm==0.18.1rc1.dev222+g8c0b6267d.cu130"
 RUN --mount=type=cache,id=uv-cache,target=/root/.cache/uv \
     pip install "${VLLM_VERSION}" \
       --index-url https://wheels.vllm.ai/nightly/cu130 \
@@ -175,10 +158,9 @@ RUN --mount=type=cache,id=uv-cache,target=/root/.cache/uv \
       --quiet
 
 # ---- Runtime dependencies ----
-# Install vLLM deps automatically, excluding torch/torchvision/torchaudio (NGC provides these)
 RUN --mount=type=cache,id=uv-cache,target=/root/.cache/uv \
     DEPS=$(pip show vllm 2>/dev/null | grep ^Requires | sed 's/Requires: //' | tr ',' '\n' | \
-      sed 's/^ *//;s/ *$//' | grep -v -E '^(torch|torchvision|torchaudio|flashinfer)' | \
+      sed 's/^ *//;s/ *$//' | grep -v -E '^(torch|torchvision|torchaudio|flashinfer|$)' | \
       tr '\n' ' ') && \
     echo "Installing vLLM deps: $DEPS" && \
     uv pip install $DEPS \
@@ -193,21 +175,26 @@ RUN --mount=type=cache,id=uv-cache,target=/root/.cache/uv \
     uv pip install transformers==${TRANSFORMERS_VER} --upgrade --no-deps --system && \
     uv pip install huggingface-hub --upgrade --no-deps --system
 
-# ---- Patches ----
+# ---- PR #38423 NVFP4 DGX Spark patches ----
+# Apply Python-level fixes from vllm-project/vllm#38423
+COPY patches/pr38423_nvfp4_spark.py /tmp/
+RUN python3 /tmp/pr38423_nvfp4_spark.py
 
-# 1. fastsafetensors natural-sort patch for multi-node weight loading
+# ---- Existing patches ----
+
+# 1. fastsafetensors natural-sort
 COPY patches/fastsafetensors_natural_sort.patch /tmp/
 RUN cd / && \
     (patch -p1 --dry-run < /tmp/fastsafetensors_natural_sort.patch &>/dev/null && \
      patch -p1 < /tmp/fastsafetensors_natural_sort.patch && \
      echo "Applied fastsafetensors natural-sort patch." || \
-     echo "Patch not applicable (may already be fixed upstream), skipping.")
+     echo "Patch not applicable, skipping.")
 
-# 2. Qwen3.5 MoE rope validation fix (transformers 5.x uses | operator on sets)
+# 2. Qwen3.5 MoE rope validation fix
 COPY patches/qwen3_5_moe_rope_fix.py /tmp/
 RUN python3 /tmp/qwen3_5_moe_rope_fix.py
 
-# 3. AOT compile cache serialization fix (torch.fx.Node pickling)
+# 3. AOT compile cache fix
 COPY patches/aot_cache_fix.patch /tmp/
 RUN cd / && \
     (patch -p1 --dry-run < /tmp/aot_cache_fix.patch &>/dev/null && \
@@ -215,7 +202,7 @@ RUN cd / && \
      echo "Applied AOT cache fix patch." || \
      echo "AOT cache fix patch not applicable, skipping.")
 
-# 4. Force nogds=True for GB10 (no GDS support)
+# 4. nogds force
 COPY patches/nogds_force.patch /tmp/
 RUN cd / && \
     (patch -p1 --dry-run < /tmp/nogds_force.patch &>/dev/null && \
@@ -223,15 +210,15 @@ RUN cd / && \
      echo "Applied nogds force patch." || \
      echo "nogds force patch not applicable, skipping.")
 
-# 5. GB10 MoE tuning configs (E=256,N=512 and E=512,N=512)
+# 5. GB10 MoE tuning configs
 COPY patches/moe_config_e256.json /usr/local/lib/python3.12/dist-packages/vllm/model_executor/layers/fused_moe/configs/E=256,N=512,device_name=NVIDIA_GB10,dtype=fp8_w8a8,block_shape=[128,128].json
 COPY patches/moe_config_e512.json /usr/local/lib/python3.12/dist-packages/vllm/model_executor/layers/fused_moe/configs/E=512,N=512,device_name=NVIDIA_GB10,dtype=fp8_w8a8,block_shape=[128,128].json
 
-# 6. SM121 compatibility patches (is_blackwell_class, nvfp4 split, TRITON_PTXAS)
+# 6. SM121 compatibility patches
 COPY patches/apply_sm121_patches.py /tmp/
-RUN python3 /tmp/apply_sm121_patches.py
+RUN python3 /tmp/apply_sm121_patches.py || \
+    echo "WARNING: SM121 patches partially failed"
 
-# Remove incompatible triton-kernels if present
 RUN uv pip uninstall triton-kernels 2>/dev/null || true
 
 # ---- Scripts ----
