@@ -14,6 +14,33 @@ Supports multiple Qwen3.5 models with different quantizations via `.env` presets
 
 ## Software Stack
 
+### v018-ngc2603 (latest, NGC 26.03)
+
+| Component | Version |
+|---|---|
+| Base Image | NGC PyTorch 26.03 |
+| vLLM | 0.18.3 (main c494977, source build) |
+| FlashInfer | v0.6.7 (CUTLASS 4.4.2, SM121 source build) |
+| PyTorch | 2.11.0a0 |
+| CUDA | 13.2 (native) |
+| NCCL | 2.29.7 |
+| Python | 3.12 |
+| Transformers | 5.2.0 |
+| `_C_stable_libtorch` | Included (NVFP4/FP8/CUTLASS full ops) |
+
+### v018-fi067 (previous, NGC 26.01)
+
+| Component | Version |
+|---|---|
+| Base Image | NGC PyTorch 26.01 |
+| vLLM | 0.18.1rc1 (nightly, cu130 wheel) |
+| FlashInfer | v0.6.7 (SM121 source build) |
+| PyTorch | 2.10.0a0 |
+| CUDA | 13.1 + 13.2 compat |
+| `_C_stable_libtorch` | Not included (wheel limitation) |
+
+### v020-fi064 (legacy, NGC 26.01)
+
 | Component | Version |
 |---|---|
 | Base Image | NGC PyTorch 26.01 |
@@ -21,18 +48,17 @@ Supports multiple Qwen3.5 models with different quantizations via `.env` presets
 | FlashInfer | v0.6.1 (SM121 build) |
 | PyTorch | 2.10.0a0 |
 | CUDA | 13.1 |
-| NCCL | 2.29 |
-| Python | 3.12 |
-| Transformers | 5.2.0 |
 
 ## Supported Models
 
 | Preset | Model | Quantization | TP | Image |
 |---|---|---|---|---|
-| `qwen3.5-397b-int4.env` | Qwen3.5-397B-A17B | INT4 AutoRound (Marlin) | 2 | base |
-| `qwen3.5-122b-fp8.env` | Qwen3.5-122B-A10B | FP8 | 2 | base |
-| `qwen3.5-122b-nvfp4.env` | Qwen3.5-122B-A10B | NVFP4 | 1 | nvfp4 |
-| `qwen3.5-122b-nvfp4-tp2.env` | Qwen3.5-122B-A10B | NVFP4 | 2 | nvfp4 |
+| `redhatai-122b-nvfp4.env` | RedHatAI Qwen3.5-122B-A10B | NVFP4 (pre-quantized) | 1 | v018-ngc2603 |
+| `wangzhang-122b-fp8.env` | wangzhang Qwen3.5-122B-A10B-abliterated | FP8 | 2 | v018-fi067 |
+| `qwen3.5-397b-int4.env` | Qwen3.5-397B-A17B | INT4 AutoRound (Marlin) | 2 | v020-fi064 |
+| `qwen3.5-122b-fp8.env` | Qwen3.5-122B-A10B | FP8 | 2 | v020-fi064 |
+| `qwen3.5-122b-nvfp4.env` | Qwen3.5-122B-A10B | NVFP4 | 1 | v020-fi064-nvfp4 |
+| `qwen3.5-122b-nvfp4-tp2.env` | Qwen3.5-122B-A10B | NVFP4 | 2 | v020-fi064-nvfp4 |
 
 ## Quick Start
 
@@ -139,13 +165,21 @@ vllm-spark/
 ├── Dockerfile.nvfp4            # NVFP4 extension
 ├── .env.example                # Full configuration template
 ├── models/                     # Validated model presets
+│   ├── redhatai-122b-nvfp4.env # RedHatAI NVFP4 (recommended, TP1)
+│   ├── wangzhang-122b-fp8.env  # abliterated FP8 (TP2)
 │   ├── qwen3.5-397b-int4.env
 │   ├── qwen3.5-122b-fp8.env
 │   ├── qwen3.5-122b-nvfp4.env
 │   └── qwen3.5-122b-nvfp4-tp2.env
-├── patches/                    # SM121 (Blackwell) compatibility patches
+├── Dockerfile                  # v020-fi064 base (NGC 26.01, legacy)
+├── Dockerfile.ngc2603-v3       # v018-ngc2603 (NGC 26.03, latest)
+├── patches/                    # SM121 / PyTorch 2.11 compatibility
+│   ├── fix_pytorch211_compat.py  # hoist + __fx_repr__ fix
+│   └── ...
 └── scripts/
-    └── run-cluster-node.sh     # Manual Ray cluster bootstrap
+    ├── run-cluster-node.sh     # Manual Ray cluster bootstrap
+    ├── verify_imports.py       # Build/runtime verification
+    └── verify_runtime.sh       # Full GPU verification
 ```
 
 ## Configuration
