@@ -159,8 +159,30 @@ patch_file(
     "remove TQ early-return shortcut",
 )
 
-# Add TURBOQUANT to priority lists (Blackwell + Ampere/Hopper)
-# This adds TURBOQUANT after FLEX_ATTENTION in both priority lists
+# Add TURBOQUANT to both priority lists via replace_all on the closing pattern.
+# Both Blackwell (SM10x) and Ampere/Hopper (SM80+) lists end with FLEX_ATTENTION.
+patch_file(
+    "vllm/platforms/cuda.py",
+    [
+        (
+            "                AttentionBackendEnum.FLEX_ATTENTION,\n"
+            "            ]\n"
+            "        else:\n"
+            "            return [\n"
+            "                AttentionBackendEnum.FLASH_ATTN,",
+            "                AttentionBackendEnum.FLEX_ATTENTION,\n"
+            "                AttentionBackendEnum.TURBOQUANT,\n"
+            "            ]\n"
+            "        else:\n"
+            "            return [\n"
+            "                AttentionBackendEnum.FLASH_ATTN,",
+        ),
+    ],
+    40060,
+    "add TURBOQUANT to Blackwell priorities",
+)
+
+# Add TURBOQUANT to the second (Ampere/Hopper) priority list
 patch_file(
     "vllm/platforms/cuda.py",
     [
@@ -168,16 +190,18 @@ patch_file(
             "                AttentionBackendEnum.FLEX_ATTENTION,\n"
             "            ]\n"
             "\n"
-            "        # SM80+ (Ampere, Hopper)",
+            "\n"
+            "def with_nvml_context",
             "                AttentionBackendEnum.FLEX_ATTENTION,\n"
             "                AttentionBackendEnum.TURBOQUANT,\n"
             "            ]\n"
             "\n"
-            "        # SM80+ (Ampere, Hopper)",
+            "\n"
+            "def with_nvml_context",
         ),
     ],
     40060,
-    "add TURBOQUANT to Blackwell priorities",
+    "add TURBOQUANT to Ampere/Hopper priorities",
 )
 
 
@@ -405,7 +429,8 @@ patch_file(
             "                block_size=1,\n"
             "                num_kv_heads=model_config.get_num_kv_heads(parallel_config),\n"
             "                head_size=model_config.get_head_size(),\n"
-            "                dtype=model_config.dtype,\n"
+            "                dtype=kv_cache_dtype,\n"
+            "                kv_quant_mode=kv_quant_mode,\n"
             "            ).page_size_bytes",
             '        elif cache_config.cache_dtype.startswith("turboquant_"):\n'
             "            from vllm.model_executor.layers.quantization.turboquant.config import (\n"
@@ -430,7 +455,8 @@ patch_file(
             "                    block_size=1,\n"
             "                    num_kv_heads=model_config.get_num_kv_heads(parallel_config),\n"
             "                    head_size=model_config.get_head_size(),\n"
-            "                    dtype=model_config.dtype,\n"
+            "                    dtype=kv_cache_dtype,\n"
+            "                    kv_quant_mode=kv_quant_mode,\n"
             "                ).page_size_bytes\n"
             "                attn_page_size_1_token = max(tq_page, skip_page)\n"
             "            else:\n"
@@ -440,7 +466,8 @@ patch_file(
             "                block_size=1,\n"
             "                num_kv_heads=model_config.get_num_kv_heads(parallel_config),\n"
             "                head_size=model_config.get_head_size(),\n"
-            "                dtype=model_config.dtype,\n"
+            "                dtype=kv_cache_dtype,\n"
+            "                kv_quant_mode=kv_quant_mode,\n"
             "            ).page_size_bytes",
         ),
     ],
