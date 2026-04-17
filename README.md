@@ -56,6 +56,8 @@ vLLM 0.19.1 with Gemma 4 support, async scheduling. Transformers 5.5.0. TTFT imp
 | `qwen3.5-397b-int4.env` | Intel/Qwen3.5-397B-A17B-int4-AutoRound | INT4 AutoRound (Marlin) | 2 | v020-ngc2603 |
 | `qwen3.5-122b-nvfp4.env` | Qwen3.5-122B-A10B | NVFP4 (runtime) | 1 | v020-ngc2603 |
 | `qwen3.5-122b-nvfp4-tp2.env` | Qwen3.5-122B-A10B | NVFP4 (runtime) | 2 | v020-ngc2603 |
+| `redhatai-122b-nvfp4-tq.env` | RedHatAI/Qwen3.5-122B-A10B-NVFP4 | NVFP4 + **TurboQuant KV** | 1 | v020-tq |
+| `gemma4-26b-a4b-tq.env` | google/gemma-4-26B-A4B-it | BF16 MoE + **TurboQuant KV** | 1 | v020-tq |
 
 ## Quick Start
 
@@ -64,8 +66,11 @@ vLLM 0.19.1 with Gemma 4 support, async scheduling. Transformers 5.5.0. TTFT imp
 #### Option A: Pull pre-built image from GHCR
 
 ```bash
-# NGC 26.03 + vLLM 0.20.0.dev (TurboQuant + Gemma 4 + Qwen3.5)
+# Base image (all models, no TQ patches)
 docker pull ghcr.io/bjk110/vllm-spark:v020-ngc2603
+
+# TurboQuant image (base + upstream TQ bugfix patches for hybrid models)
+docker pull ghcr.io/bjk110/vllm-spark:v020-tq
 ```
 
 #### Option B: Build from source

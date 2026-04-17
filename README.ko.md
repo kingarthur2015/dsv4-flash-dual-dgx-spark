@@ -56,6 +56,8 @@ vLLM 0.19.1 Gemma 4 지원, 비동기 스케줄링. Transformers 5.5.0. TTFT v01
 | `qwen3.5-397b-int4.env` | Intel/Qwen3.5-397B-A17B-int4-AutoRound | INT4 AutoRound (Marlin) | 2 | v020-ngc2603 |
 | `qwen3.5-122b-nvfp4.env` | Qwen3.5-122B-A10B | NVFP4 (런타임) | 1 | v020-ngc2603 |
 | `qwen3.5-122b-nvfp4-tp2.env` | Qwen3.5-122B-A10B | NVFP4 (런타임) | 2 | v020-ngc2603 |
+| `redhatai-122b-nvfp4-tq.env` | RedHatAI/Qwen3.5-122B-A10B-NVFP4 | NVFP4 + **TurboQuant KV** | 1 | v020-tq |
+| `gemma4-26b-a4b-tq.env` | google/gemma-4-26B-A4B-it | BF16 MoE + **TurboQuant KV** | 1 | v020-tq |
 
 ## 빠른 시작
 
@@ -64,8 +66,11 @@ vLLM 0.19.1 Gemma 4 지원, 비동기 스케줄링. Transformers 5.5.0. TTFT v01
 #### 방법 A: GHCR에서 빌드된 이미지 Pull
 
 ```bash
-# NGC 26.03 + vLLM 0.20.0.dev (TurboQuant + Gemma 4 + Qwen3.5)
+# 기본 이미지 (모든 모델, TQ 패치 미포함)
 docker pull ghcr.io/bjk110/vllm-spark:v020-ngc2603
+
+# TurboQuant 이미지 (기본 + 하이브리드 모델 TQ 버그픽스 패치)
+docker pull ghcr.io/bjk110/vllm-spark:v020-tq
 ```
 
 #### 방법 B: 소스에서 빌드
