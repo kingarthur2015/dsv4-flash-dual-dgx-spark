@@ -56,6 +56,7 @@ vLLM 0.19.1 Gemma 4 지원, 비동기 스케줄링. Transformers 5.5.0. TTFT v01
 | `qwen3.5-397b-int4.env` | Intel/Qwen3.5-397B-A17B-int4-AutoRound | INT4 AutoRound (Marlin) | 2 | v020-ngc2603 |
 | `qwen3.5-122b-nvfp4.env` | Qwen3.5-122B-A10B | NVFP4 (런타임) | 1 | v020-ngc2603 |
 | `qwen3.5-122b-nvfp4-tp2.env` | Qwen3.5-122B-A10B | NVFP4 (런타임) | 2 | v020-ngc2603 |
+| `qwen3.5-122b-prismaquant.env` | rdtand/Qwen3.5-122B-A10B-PrismaQuant-4.75bit-vllm | PrismaQuant 4.76bpp (NVFP4+MXFP8+BF16 혼합, MTP spec) | 1 | v020-ngc2603 |
 | `qwen3.6-35b-fp16.env` ⚗️ | Qwen/Qwen3.6-35B-A3B | **FP16 원본** (KV fp8) | 1 | v020-ngc2603 |
 
 ## 빠른 시작
@@ -168,7 +169,8 @@ vllm-spark/
 │   ├── qwen3.5-397b-int4.env   # 397B INT4 (TP2)
 │   ├── qwen3.5-122b-fp8.env
 │   ├── qwen3.5-122b-nvfp4.env
-│   └── qwen3.5-122b-nvfp4-tp2.env
+│   ├── qwen3.5-122b-nvfp4-tp2.env
+│   └── qwen3.5-122b-prismaquant.env # PrismaQuant 4.76bpp 혼합 (TP1)
 ├── benchmarks/                 # llama-benchy 벤치마크 결과
 │   ├── results_intel-int4-tp1.json
 │   ├── results_wangzhang-fp8-tp2.json
@@ -263,6 +265,42 @@ Dockerfile에서 적용하는 SM121 (Blackwell) 호환성 패치:
 | 2 | 45.3 | 52 |
 | 4 | 60~67 | 85~88 |
 | 8 | 59~91 | 152~160 |
+
+### Qwen3.5-122B-A10B PrismaQuant — 싱글 노드 (TP1, 혼합 정밀도 + fp8 KV)
+
+Fisher 민감도 기반 per-Linear 혼합 정밀도 체크포인트 (NVFP4 MoE 본체 / MXFP8 고민감 Linear / BF16 라우터·임베드).
+가중치 72 GB, 피크 VRAM 약 86 GB (fp8 KV @ 32k) — 단일 GB10 한 장에 탑재.
+모델에 MTP speculative-decoding 헤드가 포함되어 있으며, 본 프리셋은 로컬 튜닝 결과에 따라 **`n=1`을 기본값**으로 사용합니다.
+
+**디코드 처리량 — MTP 설정별 비교 (llama-benchy tg32, 각 3회 실행):**
+
+| 동시 요청 수 | MTP=3 총 / 피크 | MTP=1 총 / 피크 | MTP=0 총 / 피크 |
+|---|---:|---:|---:|
+| 1 | 11.2 / 12.5 | 15.7 / 16.4 | **19.1 / 20.0** |
+| 2 | 20.5 / 23.0 | 25.7 / 28.7 | **30.4 / 38.0** |
+| 3 | 21.1 / 24.0 | 30.3 / 34.0 | **39.8 / 49.0** |
+| 4 | 29.2 / 33.7 | 45.1 / 50.7 | **65.1 / 72.3** |
+
+**프리필 처리량 (pp2048 총 t/s) 및 TTFT (c=1):**
+
+| MTP | pp c=1 | pp c=4 | TTFT c=1 |
+|---|---:|---:|---:|
+| n=3 | 1,744 | 2,262 | 1,026 ms |
+| n=1 | 1,825 | 2,318 | 1,033 ms |
+| n=0 | **1,989** | **2,555** | **947 ms** |
+
+MTP speculative decoding은 스텝당 오버헤드가 있어 tg32 마이크로버스트(32 토큰 생성)에서는 오버헤드가 이득을 넘어 **MTP=0이 승**. 긴 자연문 생성에서는 수용률이 오르며 MTP=1이 MTP=0과 동등 또는 앞섬. 모델 카드에서 제시한 `n=3`은 본 하드웨어의 모든 처리량 구간에서 최악 — 추가 스펙큘레이션 토큰이 수용률을 낮추고 GB10에서 잘 상쇄되지 않음.
+
+**Intel INT4 / RedHatAI NVFP4와 비교 (동일 TP=1, c=1):**
+
+| 양자화 | 디스크 | pp2048 c=1 | tg32 c=1 | tg32 c=4 피크 |
+|---|---:|---:|---:|---:|
+| Intel INT4 AutoRound | ~65 GB | 2,084 | 29.8 | 96.0 |
+| RedHatAI NVFP4 | ~60 GB | 2,027 | 16.2 | 60.0 |
+| PrismaQuant (MTP=1) | 72 GB | 1,825 | 15.7 | 50.7 |
+| PrismaQuant (MTP=0) | 72 GB | 1,989 | 19.1 | 72.3 |
+
+GB10에서 순수 처리량은 Intel INT4가 여전히 가장 빠름. PrismaQuant의 강점은 Fisher 가중치 기반 per-Linear 할당(NVFP4 본체 + 고민감 Linear의 MXFP8 + 라우터/임베드의 BF16)에 의한 **bit당 품질** — 방법론은 모델 카드 참조.
 
 ### Qwen3.6-35B-A3B — 싱글 노드 (TP1, FP16 + fp8 KV) ⚗️
 

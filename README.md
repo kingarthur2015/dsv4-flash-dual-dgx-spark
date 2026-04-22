@@ -56,6 +56,7 @@ vLLM 0.19.1 with Gemma 4 support, async scheduling. Transformers 5.5.0. TTFT imp
 | `qwen3.5-397b-int4.env` | Intel/Qwen3.5-397B-A17B-int4-AutoRound | INT4 AutoRound (Marlin) | 2 | v020-ngc2603 |
 | `qwen3.5-122b-nvfp4.env` | Qwen3.5-122B-A10B | NVFP4 (runtime) | 1 | v020-ngc2603 |
 | `qwen3.5-122b-nvfp4-tp2.env` | Qwen3.5-122B-A10B | NVFP4 (runtime) | 2 | v020-ngc2603 |
+| `qwen3.5-122b-prismaquant.env` | rdtand/Qwen3.5-122B-A10B-PrismaQuant-4.75bit-vllm | PrismaQuant 4.76bpp (NVFP4+MXFP8+BF16 mixed, MTP spec) | 1 | v020-ngc2603 |
 | `qwen3.6-35b-fp16.env` ⚗️ | Qwen/Qwen3.6-35B-A3B | **FP16 original** (KV fp8) | 1 | v020-ngc2603 |
 
 ## Quick Start
@@ -168,7 +169,8 @@ vllm-spark/
 │   ├── qwen3.5-397b-int4.env   # 397B INT4 (TP2)
 │   ├── qwen3.5-122b-fp8.env
 │   ├── qwen3.5-122b-nvfp4.env
-│   └── qwen3.5-122b-nvfp4-tp2.env
+│   ├── qwen3.5-122b-nvfp4-tp2.env
+│   └── qwen3.5-122b-prismaquant.env # PrismaQuant 4.76bpp mixed (TP1)
 ├── benchmarks/                 # llama-benchy benchmark results
 │   ├── results_intel-int4-tp1.json
 │   ├── results_wangzhang-fp8-tp2.json
@@ -263,6 +265,42 @@ All benchmarks measured with [llama-benchy](https://github.com/eugr/llama-benchy
 | 2 | 45.3 | 52 |
 | 4 | 60~67 | 85~88 |
 | 8 | 59~91 | 152~160 |
+
+### Qwen3.5-122B-A10B PrismaQuant — Single Node (TP1, mixed-precision + fp8 KV)
+
+4.76bpp mixed-precision checkpoint (NVFP4 bulk MoE / MXFP8 high-sensitivity Linears / BF16 router+embed).
+Weights 72 GB, peak VRAM ~86 GB (fp8 KV @ 32k) on a single GB10.
+Model ships with MTP speculative-decoding heads — this preset defaults to `n=1` after local tuning.
+
+**Decode throughput vs MTP setting (llama-benchy, 3 runs each, tg32):**
+
+| Concurrency | MTP=3 total / peak | MTP=1 total / peak | MTP=0 total / peak |
+|---|---:|---:|---:|
+| 1 | 11.2 / 12.5 | 15.7 / 16.4 | **19.1 / 20.0** |
+| 2 | 20.5 / 23.0 | 25.7 / 28.7 | **30.4 / 38.0** |
+| 3 | 21.1 / 24.0 | 30.3 / 34.0 | **39.8 / 49.0** |
+| 4 | 29.2 / 33.7 | 45.1 / 50.7 | **65.1 / 72.3** |
+
+**Prefill throughput (pp2048 total t/s) and TTFT (c=1):**
+
+| MTP | pp c=1 | pp c=4 | TTFT c=1 |
+|---|---:|---:|---:|
+| n=3 | 1,744 | 2,262 | 1,026 ms |
+| n=1 | 1,825 | 2,318 | 1,033 ms |
+| n=0 | **1,989** | **2,555** | **947 ms** |
+
+MTP speculative decoding adds per-step overhead; on tg32 microbursts (32 generated tokens) the overhead dominates and MTP=0 wins. For longer natural-text generation the acceptance rate rises and MTP=1 matches or beats MTP=0. MTP=3 (model-card default) measured worst in every throughput bucket on this hardware — the extra speculative tokens lower acceptance and amortize poorly on GB10.
+
+**vs Intel INT4 / RedHatAI NVFP4 (same TP=1, c=1, prior runs):**
+
+| Quant | Disk | pp2048 c=1 | tg32 c=1 | tg32 c=4 peak |
+|---|---:|---:|---:|---:|
+| Intel INT4 AutoRound | ~65 GB | 2,084 | 29.8 | 96.0 |
+| RedHatAI NVFP4 | ~60 GB | 2,027 | 16.2 | 60.0 |
+| PrismaQuant (MTP=1) | 72 GB | 1,825 | 15.7 | 50.7 |
+| PrismaQuant (MTP=0) | 72 GB | 1,989 | 19.1 | 72.3 |
+
+Intel INT4 remains fastest on GB10. PrismaQuant's value is **quality-per-bit** via Fisher-weighted per-Linear allocation (NVFP4 bulk + MXFP8 for sensitive Linears + BF16 for router/embed) — see the model card for the methodology.
 
 ### Qwen3.6-35B-A3B — Single Node (TP1, FP16 + fp8 KV) ⚗️
 
