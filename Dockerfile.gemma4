@@ -232,6 +232,10 @@ COPY patches/moe_config_e512.json \
 COPY patches/apply_sm121_patches.py /tmp/
 RUN python3 /tmp/apply_sm121_patches.py || echo "[patch] SM121 partial"
 
+# ---- TurboQuant upstream fixes (PRs #40074, #39988, #40060, #39931, #40092) ----
+COPY patches/apply_turboquant_fixes.py /tmp/
+RUN python3 /tmp/apply_turboquant_fixes.py
+
 RUN uv pip uninstall triton-kernels 2>/dev/null || true
 
 # ---- Verification scripts ----
