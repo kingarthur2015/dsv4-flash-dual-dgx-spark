@@ -527,19 +527,13 @@ memory pressure):
 
 ## Branch structure
 
-This repository is currently maintained with two primary branches:
-
-- **`main`**: the current base branch
-  Contains the refreshed base stack, including the updated vLLM / FlashInfer / Transformers / container baseline.
-
-- **`feat/turboquant-rebase-20260417`**: the active TurboQuant branch
-  Used for TurboQuant-specific integration, validation, and follow-up experiments on top of the current base branch.
+`main` is the only long-lived branch. All previously separate work
+streams (base stack refresh, TurboQuant rebase, single-Spark CLUSTER_MODE)
+have been merged in and their feature branches deleted.
 
 ### Archived branch history
 
-Older experimental branches have been cleaned up after their contents were either merged into `main` or superseded by the current TurboQuant rebase work.
-
-The legacy TurboQuant branch is preserved as a tag:
+The legacy TurboQuant branch is preserved as a tag for reference:
 
 - **`archive/feat-turboquant`**
 

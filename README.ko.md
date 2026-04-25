@@ -524,19 +524,13 @@ ssh spark01 'cd ~/docker/vllm-spark && \
 
 ## 브랜치 구조
 
-이 저장소는 현재 두 개의 주 브랜치로 관리됩니다:
-
-- **`main`**: 현재 베이스 브랜치
-  vLLM / FlashInfer / Transformers / 컨테이너 기준이 갱신된 refresh 스택을 포함합니다.
-
-- **`feat/turboquant-rebase-20260417`**: 활성 TurboQuant 브랜치
-  현재 베이스 브랜치 위에서 TurboQuant 통합·검증·후속 실험을 진행하는 브랜치입니다.
+`main`이 유일한 장기 브랜치입니다. 이전의 별도 작업 흐름(베이스 스택 갱신,
+TurboQuant 리베이스, 단일 Spark CLUSTER_MODE)은 모두 머지되어 feature
+브랜치는 정리된 상태입니다.
 
 ### 아카이브된 브랜치 이력
 
-이전의 실험용 브랜치들은 `main` 에 머지되었거나 현재의 TurboQuant 리베이스 작업으로 대체된 후 정리되었습니다.
-
-구형 TurboQuant 브랜치는 태그로 보존되어 있습니다:
+구형 TurboQuant 브랜치는 참고용 태그로 보존되어 있습니다:
 
 - **`archive/feat-turboquant`**
 
