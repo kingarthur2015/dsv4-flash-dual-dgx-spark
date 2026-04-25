@@ -11,26 +11,91 @@ fi
 # =============================================================================
 # vLLM Spark Unified Entrypoint
 #
-# Automatically handles:
-#   - TP1 standalone (no Ray, direct vllm serve)
-#   - TP2+ head (Ray head → wait for workers → vllm serve)
-#   - TP2+ worker (Ray worker --block)
+# Cluster modes (CLUSTER_MODE):
+#   single     (default) — one DGX Spark, no RDMA, no Ray. The entrypoint
+#              forces VLLM_HOST_IP=127.0.0.1 and clears NCCL/GLOO/UCX
+#              interface bindings so vLLM/PyTorch c10d does not try to
+#              bind to a missing 10.10.10.x RoCE IP and hang.
+#   dual-rdma  Two DGX Sparks over 200 Gbps RoCE. Requires HEAD_ROCE_IP,
+#              WORKER_ROCE_IP, ROCE_IF_NAME, IB_HCA_NAME, RAY_PORT.
 #
-# Required environment variables:
-#   ROLE              - "head" or "worker"
-#   TP_SIZE           - tensor parallel size (1 = standalone, 2+ = multi-node)
+# Role × TP_SIZE behavior:
+#   head    + TP_SIZE=1   → direct vllm serve, no Ray, single-rank c10d.
+#   head    + TP_SIZE>=2  → Ray head → wait for workers → vllm serve.
+#                           Requires CLUSTER_MODE=dual-rdma.
+#   worker  + (any)       → ray start --block. Requires CLUSTER_MODE=dual-rdma.
+#
+# Required environment:
+#   ROLE                  - "head" or "worker" (compose profiles set this)
 #   MODEL_CONTAINER_PATH  - model path inside container
 #   SERVED_MODEL_NAME     - model name for API
 #
-# Optional (with defaults):
+# Optional (with sensible defaults):
+#   CLUSTER_MODE          - single (default) | dual-rdma
+#   TP_SIZE               - 1 (default) ; 2+ implies dual-rdma
 #   HOST_PORT, MAX_MODEL_LEN, MAX_NUM_SEQS, GPU_MEMORY_UTILIZATION,
 #   MAX_NUM_BATCHED_TOKENS, VLLM_EXTRA_ARGS
 # =============================================================================
 
 : "${ROLE:?ROLE must be set to 'head' or 'worker'}"
 : "${TP_SIZE:=1}"
+: "${CLUSTER_MODE:=single}"
 
-# ---- Worker: just join Ray and block ----
+# ---------------------------------------------------------------------------
+# Cluster mode normalization
+# ---------------------------------------------------------------------------
+# In single mode we must aggressively clear any RDMA env that compose may
+# have piped in from a stale .env, because PyTorch c10d / NCCL / GLOO will
+# try to bind those interfaces / IPs and stall the server socket.
+case "${CLUSTER_MODE}" in
+    single)
+        if [ "${TP_SIZE}" -gt 1 ]; then
+            echo "[entrypoint] ERROR: CLUSTER_MODE=single but TP_SIZE=${TP_SIZE}." >&2
+            echo "[entrypoint]   TP>=2 requires CLUSTER_MODE=dual-rdma + 2 Sparks." >&2
+            exit 1
+        fi
+        if [ "${ROLE}" = "worker" ]; then
+            echo "[entrypoint] ERROR: ROLE=worker is meaningless in CLUSTER_MODE=single." >&2
+            echo "[entrypoint]   Use ROLE=head (docker compose --profile head)." >&2
+            exit 1
+        fi
+        # Force loopback for c10d master store; loopback always exists,
+        # so single-rank init completes immediately.
+        export VLLM_HOST_IP=127.0.0.1
+        # Clear interface bindings — let NCCL/GLOO/UCX pick whatever default
+        # is sane for a single host. NCCL on a single-GPU host doesn't need
+        # InfiniBand or a specific socket interface.
+        unset NCCL_SOCKET_IFNAME
+        unset GLOO_SOCKET_IFNAME
+        unset UCX_NET_DEVICES
+        unset NCCL_IB_HCA
+        # Disable IB transport explicitly. Without this, NCCL probes IB
+        # devices even on single-host setups and may print scary warnings.
+        export NCCL_IB_DISABLE=1
+        # Single GPU: P2P/SHM are within the same device, no cross-node.
+        export NCCL_P2P_DISABLE=${NCCL_P2P_DISABLE:-0}
+        echo "[entrypoint] CLUSTER_MODE=single: VLLM_HOST_IP=127.0.0.1, NCCL_IB_DISABLE=1, NCCL/GLOO/UCX ifname cleared"
+        ;;
+    dual-rdma)
+        # Validate the RDMA env compose passes through. Fail fast on missing
+        # values so we don't silently fall back to a broken default.
+        for v in HEAD_ROCE_IP WORKER_ROCE_IP ROCE_IF_NAME IB_HCA_NAME RAY_PORT; do
+            if [ -z "${!v:-}" ]; then
+                echo "[entrypoint] ERROR: CLUSTER_MODE=dual-rdma requires ${v} to be set in .env" >&2
+                exit 1
+            fi
+        done
+        # VLLM_HOST_IP / RAY_NODE_IP_ADDRESS are already set by compose
+        # to HEAD_ROCE_IP (head) or WORKER_ROCE_IP (worker). Leave alone.
+        echo "[entrypoint] CLUSTER_MODE=dual-rdma: head=${HEAD_ROCE_IP} worker=${WORKER_ROCE_IP} iface=${ROCE_IF_NAME} hca=${IB_HCA_NAME}"
+        ;;
+    *)
+        echo "[entrypoint] ERROR: CLUSTER_MODE must be 'single' or 'dual-rdma', got '${CLUSTER_MODE}'" >&2
+        exit 1
+        ;;
+esac
+
+# ---- Worker: just join Ray and block (dual-rdma only) ----
 if [ "${ROLE}" = "worker" ]; then
     # Clean any leftover Ray state
     ray stop --force 2>/dev/null || true
@@ -87,7 +152,7 @@ if [ "${TP_SIZE}" -ge 2 ]; then
     )
 else
     # ---- Standalone: direct serve, no Ray ----
-    echo "[entrypoint] Starting vLLM standalone (TP_SIZE=1)..."
+    echo "[entrypoint] Starting vLLM standalone (TP_SIZE=1, CLUSTER_MODE=${CLUSTER_MODE})..."
 fi
 
 # Append model-specific extra args (split on whitespace)

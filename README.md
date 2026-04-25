@@ -2,15 +2,22 @@
 
 **[한국어](README.ko.md)** | English
 
-Unified vLLM serving configuration for NVIDIA DGX Spark dual-node cluster (GB10 x 2).
-Supports multiple models (Qwen3.5, Gemma 4) with different quantizations via `.env` presets — one repo, one Dockerfile, one compose file.
+Unified vLLM serving configuration for NVIDIA DGX Spark (GB10), supporting two
+topologies from the same repo / Dockerfile / compose file:
+
+- **Single Spark** (default, zero RDMA setup) — one GB10 box, TP=1.
+- **Dual Spark + 200 Gbps RoCE/IB** — two GB10 boxes, Ray, TP=2.
+
+Pick the topology by setting `CLUSTER_MODE=single` (default) or
+`CLUSTER_MODE=dual-rdma` in your `.env`. See [`Quick Start`](#quick-start) below.
 
 ## Hardware
 
-| Node | Role | GPU | Memory | Interconnect |
-|---|---|---|---|---|
-| spark01 | Ray Head + vLLM API | NVIDIA GB10 (Blackwell) | 119 GiB unified | 200Gbps RoCE |
-| spark02 | Ray Worker | NVIDIA GB10 (Blackwell) | 119 GiB unified | 200Gbps RoCE |
+| Topology | Node | Role | GPU | Memory | Interconnect |
+|---|---|---|---|---|---|
+| single | one Spark | vLLM API | NVIDIA GB10 (Blackwell) | 119 GiB unified | n/a |
+| dual-rdma | spark01 | Ray Head + vLLM API | NVIDIA GB10 (Blackwell) | 119 GiB unified | 200Gbps RoCE |
+| dual-rdma | spark02 | Ray Worker | NVIDIA GB10 (Blackwell) | 119 GiB unified | 200Gbps RoCE |
 
 ## Software Stack
 
@@ -89,20 +96,39 @@ Build arguments:
 
 ### 1. Choose a Model Preset
 
+Single-Spark presets ship with `CLUSTER_MODE=single` and TP=1 (zero RDMA setup).
+Dual-Spark presets ship with `CLUSTER_MODE=dual-rdma` and TP=2.
+
 ```bash
+# Single Spark (no RDMA needed):
+cp models/redhatai-122b-nvfp4.env .env
+
+# Dual Spark + RoCE:
 cp models/qwen3.5-397b-int4.env .env
 ```
 
 Edit `MODEL_PATH` in `.env` to point to your local model weights directory:
 
 ```bash
-# Replace [model_path] with your actual path
 sed -i 's|\[model_path\]|/home/user/models|' .env
 ```
 
 ### 2. Start Services
 
-#### TP2 Multi-Node (e.g., 397B INT4)
+#### Single Spark — TP=1 (default, no Ray, no RDMA)
+
+```bash
+docker compose --profile head up -d
+docker logs -f vllm-spark-head
+```
+
+`entrypoint.sh` reads `CLUSTER_MODE=single` and **forces** `VLLM_HOST_IP=127.0.0.1`,
+unsets `NCCL_SOCKET_IFNAME` / `GLOO_SOCKET_IFNAME` / `UCX_NET_DEVICES` / `NCCL_IB_HCA`,
+and sets `NCCL_IB_DISABLE=1`. This is what avoids the
+`tcp://10.10.10.1:<port> server socket has timed out` c10d hang
+(see [Troubleshooting](#troubleshooting) below).
+
+#### Dual Spark — TP=2 (Ray + RoCE)
 
 ```bash
 # spark01 (head):
@@ -112,24 +138,52 @@ docker compose --profile head up -d
 docker compose --profile worker up -d
 ```
 
-The head node automatically waits for the worker to join the Ray cluster before launching vLLM.
-
-#### TP1 Single-Node (e.g., NVFP4 122B)
-
-```bash
-cp models/qwen3.5-122b-nvfp4.env .env
-docker compose --profile head up -d
-```
-
-When `TP_SIZE=1`, the entrypoint skips Ray entirely and runs `vllm serve` directly.
+The head waits for the worker to join the Ray cluster, then launches vLLM
+with `--distributed-executor-backend ray`. Requires `HEAD_ROCE_IP`,
+`WORKER_ROCE_IP`, `ROCE_IF_NAME`, `IB_HCA_NAME`, `RAY_PORT` in `.env`
+(uncomment the block in any preset shipped with `CLUSTER_MODE=dual-rdma`).
 
 ### 3. Verify
 
 ```bash
-curl http://spark01:8000/health
+curl http://localhost:8000/health      # single
+curl http://spark01:8000/health        # dual-rdma
 ```
 
+## Troubleshooting
+
+### `[c10d] The server socket on [::ffff:10.10.10.1]:<port> has timed out, will retry.`
+
+This means a single-Spark setup is leaking RDMA env (`VLLM_HOST_IP=10.10.10.1`,
+`GLOO_SOCKET_IFNAME=enp1s0f0np0`, etc.) into the container, and PyTorch c10d
+can't bind to a RoCE IP that doesn't exist on this host. Fix:
+
+1. Confirm `.env` (or the preset you copied) has `CLUSTER_MODE=single`.
+2. Make sure the `HEAD_ROCE_IP=…` / `ROCE_IF_NAME=…` / `IB_HCA_NAME=…` lines
+   are **commented out** (lines starting with `#`) in single-mode presets.
+3. Recreate the container:
+   ```bash
+   docker compose --profile head down
+   docker compose --profile head up -d
+   ```
+   `entrypoint.sh` will print
+   `CLUSTER_MODE=single: VLLM_HOST_IP=127.0.0.1, NCCL_IB_DISABLE=1, NCCL/GLOO/UCX ifname cleared`
+   on a clean single-Spark start.
+
 ## Architecture
+
+### Single Spark (CLUSTER_MODE=single, TP=1)
+
+```
+single Spark
+┌──────────────────────────────────┐
+│  vLLM API (:8000)                │
+│  c10d binds 127.0.0.1            │
+│  GB10 GPU, TP rank 0             │
+└──────────────────────────────────┘
+```
+
+### Dual Spark (CLUSTER_MODE=dual-rdma, TP=2)
 
 ```
 spark01 (head)                    spark02 (worker)
@@ -143,13 +197,17 @@ spark01 (head)                    spark02 (worker)
 
 ### How the Entrypoint Works
 
-`entrypoint.sh` routes automatically based on `ROLE` and `TP_SIZE`:
+`entrypoint.sh` normalizes the environment based on `CLUSTER_MODE`, then
+dispatches on `ROLE` × `TP_SIZE`:
 
-| ROLE | TP_SIZE | Behavior |
-|---|---|---|
-| `head` | 1 | Direct `vllm serve` (no Ray) |
-| `head` | 2+ | Ray head → wait for workers → `vllm serve --distributed-executor-backend ray` |
-| `worker` | any | `ray start --block` (joins head) |
+| CLUSTER_MODE | ROLE | TP_SIZE | Behavior |
+|---|---|---|---|
+| `single`     | `head`   | 1   | Force `VLLM_HOST_IP=127.0.0.1`, clear NCCL/GLOO/UCX ifname, set `NCCL_IB_DISABLE=1`, then direct `vllm serve` (no Ray) |
+| `single`     | `head`   | 2+  | Fail-fast (`single` cannot host TP≥2) |
+| `single`     | `worker` | any | Fail-fast (worker is meaningless in single mode) |
+| `dual-rdma`  | `head`   | 1   | Reject (use `single` for TP=1) |
+| `dual-rdma`  | `head`   | 2+  | Validate RDMA env → Ray head → wait for workers → `vllm serve --distributed-executor-backend ray` |
+| `dual-rdma`  | `worker` | any | `ray start --address=$HEAD_ROCE_IP:$RAY_PORT --block` |
 
 ### Repository Structure
 
@@ -196,7 +254,13 @@ All configuration is via `.env`. See [`.env.example`](.env.example) for full doc
 | `MODEL_PATH` | Host path to model weights | `/home/user/Models/Qwen/...` |
 | `MODEL_CONTAINER_PATH` | Container mount point | `/models/Qwen3.5-397B-...` |
 | `SERVED_MODEL_NAME` | API model name | `Qwen/Qwen3.5-397B-...` |
-| `TP_SIZE` | Tensor parallel size (1=standalone, 2+=Ray) | `2` |
+| `CLUSTER_MODE` | Topology: `single` (default) or `dual-rdma` | `single` |
+| `TP_SIZE` | Tensor parallel size (1=single, 2+=dual-rdma) | `1` |
+| `HEAD_ROCE_IP` | (`dual-rdma` only) head node RoCE IP | `10.10.10.1` |
+| `WORKER_ROCE_IP` | (`dual-rdma` only) worker node RoCE IP | `10.10.10.2` |
+| `ROCE_IF_NAME` | (`dual-rdma` only) RoCE interface name | `enp1s0f0np0` |
+| `IB_HCA_NAME` | (`dual-rdma` only) InfiniBand HCA name | `rocep1s0f0` |
+| `RAY_PORT` | (`dual-rdma` only) Ray head port | `6379` |
 | `VLLM_EXTRA_ARGS` | Model-specific vllm serve flags | `--kv-cache-dtype fp8 --reasoning-parser qwen3` |
 | `VLLM_MARLIN_USE_ATOMIC_ADD` | Enable for INT4 AutoRound | `1` (or empty to disable) |
 

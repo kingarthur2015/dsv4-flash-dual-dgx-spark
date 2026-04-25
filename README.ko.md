@@ -2,15 +2,22 @@
 
 한국어 | **[English](README.md)**
 
-NVIDIA DGX Spark 듀얼 노드 클러스터(GB10 x 2)를 위한 통합 vLLM 서빙 구성입니다.
-여러 모델(Qwen3.5, Gemma 4)을 다양한 양자화 방식으로 `.env` 프리셋 하나로 전환할 수 있습니다 — 리포 하나, Dockerfile 하나, compose 파일 하나.
+NVIDIA DGX Spark (GB10) 통합 vLLM 서빙 구성입니다. 동일한 리포 / Dockerfile /
+compose 파일로 두 가지 토폴로지를 지원합니다:
+
+- **단일 Spark** (기본값, RDMA 설정 불필요) — GB10 한 대, TP=1.
+- **듀얼 Spark + 200 Gbps RoCE/IB** — GB10 두 대, Ray, TP=2.
+
+`.env`에서 `CLUSTER_MODE=single` (기본) 또는 `CLUSTER_MODE=dual-rdma`로 토폴로지를
+선택합니다. 자세한 내용은 아래 [`빠른 시작`](#빠른-시작)을 참고하세요.
 
 ## 하드웨어
 
-| 노드 | 역할 | GPU | 메모리 | 인터커넥트 |
-|---|---|---|---|---|
-| spark01 | Ray Head + vLLM API | NVIDIA GB10 (Blackwell) | 119 GiB 통합 메모리 | 200Gbps RoCE |
-| spark02 | Ray Worker | NVIDIA GB10 (Blackwell) | 119 GiB 통합 메모리 | 200Gbps RoCE |
+| 토폴로지 | 노드 | 역할 | GPU | 메모리 | 인터커넥트 |
+|---|---|---|---|---|---|
+| single | Spark 한 대 | vLLM API | NVIDIA GB10 (Blackwell) | 119 GiB 통합 메모리 | 해당 없음 |
+| dual-rdma | spark01 | Ray Head + vLLM API | NVIDIA GB10 (Blackwell) | 119 GiB 통합 메모리 | 200Gbps RoCE |
+| dual-rdma | spark02 | Ray Worker | NVIDIA GB10 (Blackwell) | 119 GiB 통합 메모리 | 200Gbps RoCE |
 
 ## 소프트웨어 스택
 
@@ -89,20 +96,39 @@ docker buildx build -f Dockerfile.gemma4 \
 
 ### 1. 모델 프리셋 선택
 
+단일 Spark 프리셋은 `CLUSTER_MODE=single`, TP=1로 출고됩니다 (RDMA 설정 불필요).
+듀얼 Spark 프리셋은 `CLUSTER_MODE=dual-rdma`, TP=2로 출고됩니다.
+
 ```bash
+# 단일 Spark (RDMA 불필요):
+cp models/redhatai-122b-nvfp4.env .env
+
+# 듀얼 Spark + RoCE:
 cp models/qwen3.5-397b-int4.env .env
 ```
 
 `.env`의 `MODEL_PATH`를 실제 모델 가중치 경로로 수정합니다:
 
 ```bash
-# [model_path]를 실제 경로로 변경
 sed -i 's|\[model_path\]|/home/user/models|' .env
 ```
 
 ### 2. 서비스 시작
 
-#### TP2 멀티노드 (예: 397B INT4)
+#### 단일 Spark — TP=1 (기본, Ray/RDMA 없음)
+
+```bash
+docker compose --profile head up -d
+docker logs -f vllm-spark-head
+```
+
+`entrypoint.sh`가 `CLUSTER_MODE=single`을 읽고 **강제로** `VLLM_HOST_IP=127.0.0.1`,
+`NCCL_SOCKET_IFNAME` / `GLOO_SOCKET_IFNAME` / `UCX_NET_DEVICES` / `NCCL_IB_HCA` unset,
+`NCCL_IB_DISABLE=1`을 적용합니다. 이게 단일 Spark에서 발생하는
+`tcp://10.10.10.1:<port> server socket has timed out` c10d hang을 막아주는 핵심입니다
+(아래 [트러블슈팅](#트러블슈팅) 참조).
+
+#### 듀얼 Spark — TP=2 (Ray + RoCE)
 
 ```bash
 # spark01 (head):
@@ -112,24 +138,52 @@ docker compose --profile head up -d
 docker compose --profile worker up -d
 ```
 
-Head 노드는 Worker가 Ray 클러스터에 참여할 때까지 자동으로 대기한 후 vLLM을 시작합니다.
-
-#### TP1 싱글노드 (예: NVFP4 122B)
-
-```bash
-cp models/qwen3.5-122b-nvfp4.env .env
-docker compose --profile head up -d
-```
-
-`TP_SIZE=1`이면 Ray 없이 `vllm serve`를 직접 실행합니다.
+Head는 Worker가 Ray 클러스터에 참여할 때까지 대기한 후
+`--distributed-executor-backend ray`로 vLLM을 시작합니다. `.env`에 `HEAD_ROCE_IP`,
+`WORKER_ROCE_IP`, `ROCE_IF_NAME`, `IB_HCA_NAME`, `RAY_PORT`가 필요합니다
+(`CLUSTER_MODE=dual-rdma` 프리셋은 해당 블록을 활성화한 상태로 출고됩니다).
 
 ### 3. 동작 확인
 
 ```bash
-curl http://spark01:8000/health
+curl http://localhost:8000/health      # 단일
+curl http://spark01:8000/health        # 듀얼-rdma
 ```
 
+## 트러블슈팅
+
+### `[c10d] The server socket on [::ffff:10.10.10.1]:<port> has timed out, will retry.`
+
+단일 Spark 환경에서 RDMA 환경변수(`VLLM_HOST_IP=10.10.10.1`,
+`GLOO_SOCKET_IFNAME=enp1s0f0np0` 등)가 컨테이너로 새어 들어가, PyTorch c10d가
+이 호스트에 존재하지 않는 RoCE IP에 바인드를 시도하기 때문에 발생합니다. 해결:
+
+1. `.env` (또는 복사한 프리셋)에 `CLUSTER_MODE=single`이 있는지 확인합니다.
+2. 단일 모드 프리셋의 `HEAD_ROCE_IP=…` / `ROCE_IF_NAME=…` / `IB_HCA_NAME=…` 행이
+   **주석 처리** (`#`로 시작)되어 있는지 확인합니다.
+3. 컨테이너를 재생성합니다:
+   ```bash
+   docker compose --profile head down
+   docker compose --profile head up -d
+   ```
+   정상 시작 시 `entrypoint.sh`가
+   `CLUSTER_MODE=single: VLLM_HOST_IP=127.0.0.1, NCCL_IB_DISABLE=1, NCCL/GLOO/UCX ifname cleared`
+   로그를 출력합니다.
+
 ## 아키텍처
+
+### 단일 Spark (CLUSTER_MODE=single, TP=1)
+
+```
+single Spark
+┌──────────────────────────────────┐
+│  vLLM API (:8000)                │
+│  c10d binds 127.0.0.1            │
+│  GB10 GPU, TP rank 0             │
+└──────────────────────────────────┘
+```
+
+### 듀얼 Spark (CLUSTER_MODE=dual-rdma, TP=2)
 
 ```
 spark01 (head)                    spark02 (worker)
@@ -143,13 +197,16 @@ spark01 (head)                    spark02 (worker)
 
 ### 엔트리포인트 동작 방식
 
-`entrypoint.sh`는 `ROLE`과 `TP_SIZE`에 따라 자동으로 분기합니다:
+`entrypoint.sh`는 `CLUSTER_MODE`에 따라 환경변수를 정규화한 다음 `ROLE` × `TP_SIZE`로 분기합니다:
 
-| ROLE | TP_SIZE | 동작 |
-|---|---|---|
-| `head` | 1 | `vllm serve` 직접 실행 (Ray 없음) |
-| `head` | 2+ | Ray head 시작 → 워커 대기 → `vllm serve --distributed-executor-backend ray` |
-| `worker` | any | `ray start --block` (head에 참여) |
+| CLUSTER_MODE | ROLE | TP_SIZE | 동작 |
+|---|---|---|---|
+| `single`     | `head`   | 1   | `VLLM_HOST_IP=127.0.0.1` 강제, NCCL/GLOO/UCX ifname 제거, `NCCL_IB_DISABLE=1`, 그 후 `vllm serve` 직접 실행 (Ray 없음) |
+| `single`     | `head`   | 2+  | Fail-fast (`single`은 TP≥2를 호스팅 불가) |
+| `single`     | `worker` | any | Fail-fast (단일 모드에서 worker는 의미 없음) |
+| `dual-rdma`  | `head`   | 1   | 거부 (TP=1은 `single`을 사용) |
+| `dual-rdma`  | `head`   | 2+  | RDMA 환경변수 검증 → Ray head → 워커 대기 → `vllm serve --distributed-executor-backend ray` |
+| `dual-rdma`  | `worker` | any | `ray start --address=$HEAD_ROCE_IP:$RAY_PORT --block` |
 
 ### 리포지토리 구조
 
@@ -196,7 +253,13 @@ vllm-spark/
 | `MODEL_PATH` | 호스트의 모델 가중치 경로 | `/home/user/Models/Qwen/...` |
 | `MODEL_CONTAINER_PATH` | 컨테이너 내 마운트 경로 | `/models/Qwen3.5-397B-...` |
 | `SERVED_MODEL_NAME` | API 모델 이름 | `Qwen/Qwen3.5-397B-...` |
-| `TP_SIZE` | 텐서 병렬 크기 (1=단독, 2+=Ray) | `2` |
+| `CLUSTER_MODE` | 토폴로지: `single` (기본) 또는 `dual-rdma` | `single` |
+| `TP_SIZE` | 텐서 병렬 크기 (1=single, 2+=dual-rdma) | `1` |
+| `HEAD_ROCE_IP` | (`dual-rdma` 전용) head 노드 RoCE IP | `10.10.10.1` |
+| `WORKER_ROCE_IP` | (`dual-rdma` 전용) worker 노드 RoCE IP | `10.10.10.2` |
+| `ROCE_IF_NAME` | (`dual-rdma` 전용) RoCE 인터페이스 이름 | `enp1s0f0np0` |
+| `IB_HCA_NAME` | (`dual-rdma` 전용) InfiniBand HCA 이름 | `rocep1s0f0` |
+| `RAY_PORT` | (`dual-rdma` 전용) Ray head 포트 | `6379` |
 | `VLLM_EXTRA_ARGS` | 모델별 vllm serve 추가 플래그 | `--kv-cache-dtype fp8 --reasoning-parser qwen3` |
 | `VLLM_MARLIN_USE_ATOMIC_ADD` | INT4 AutoRound 활성화 | `1` (비활성화: 빈 값) |
 

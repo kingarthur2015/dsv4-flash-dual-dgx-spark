@@ -6,9 +6,10 @@ services:
     network_mode: host
     ipc: host
     environment:
-      # ---- Role ----
+      # ---- Role + cluster mode ----
       - ROLE=head
-      - TP_SIZE=${TP_SIZE}
+      - CLUSTER_MODE=${CLUSTER_MODE:-single}
+      - TP_SIZE=${TP_SIZE:-1}
       # ---- Model ----
       - MODEL_CONTAINER_PATH=${MODEL_CONTAINER_PATH}
       - SERVED_MODEL_NAME=${SERVED_MODEL_NAME}
@@ -31,17 +32,25 @@ services:
       # ---- Patches (0 = disabled) ----
       - APPLY_TEXT_ONLY_SHIM=${APPLY_TEXT_ONLY_SHIM:-0}
       # ---- Multi-node networking (200Gbps RoCE) ----
-      - VLLM_HOST_IP=${HEAD_ROCE_IP}
-      - RAY_NODE_IP_ADDRESS=${HEAD_ROCE_IP}
-      - RAY_OVERRIDE_NODE_IP_ADDRESS=${HEAD_ROCE_IP}
-      - HEAD_ROCE_IP=${HEAD_ROCE_IP}
-      - RAY_PORT=${RAY_PORT}
-      - NCCL_SOCKET_IFNAME=${ROCE_IF_NAME}
-      - GLOO_SOCKET_IFNAME=${ROCE_IF_NAME}
-      - UCX_NET_DEVICES=${ROCE_IF_NAME}
-      - NCCL_IB_HCA=${IB_HCA_NAME}
-      - NCCL_IB_DISABLE=0
-      - NCCL_DEBUG=INFO
+      # All RDMA vars use empty defaults so single-Spark users do not need
+      # to set them. entrypoint.sh normalizes for CLUSTER_MODE=single by
+      # forcing VLLM_HOST_IP=127.0.0.1 and clearing NCCL/GLOO/UCX ifname,
+      # which is what avoids the "tcp://10.10.10.1 server socket has timed
+      # out" c10d hang.
+      - VLLM_HOST_IP=${HEAD_ROCE_IP:-}
+      - RAY_NODE_IP_ADDRESS=${HEAD_ROCE_IP:-}
+      - RAY_OVERRIDE_NODE_IP_ADDRESS=${HEAD_ROCE_IP:-}
+      - HEAD_ROCE_IP=${HEAD_ROCE_IP:-}
+      - WORKER_ROCE_IP=${WORKER_ROCE_IP:-}
+      - ROCE_IF_NAME=${ROCE_IF_NAME:-}
+      - IB_HCA_NAME=${IB_HCA_NAME:-}
+      - RAY_PORT=${RAY_PORT:-}
+      - NCCL_SOCKET_IFNAME=${ROCE_IF_NAME:-}
+      - GLOO_SOCKET_IFNAME=${ROCE_IF_NAME:-}
+      - UCX_NET_DEVICES=${ROCE_IF_NAME:-}
+      - NCCL_IB_HCA=${IB_HCA_NAME:-}
+      - NCCL_IB_DISABLE=${NCCL_IB_DISABLE:-0}
+      - NCCL_DEBUG=${NCCL_DEBUG:-WARN}
       - RAY_DEDUP_LOGS=0
       - RAY_memory_monitor_refresh_ms=0
     deploy:
@@ -73,23 +82,28 @@ services:
     network_mode: host
     ipc: host
     environment:
-      # ---- Role ----
+      # ---- Role + cluster mode ----
       - ROLE=worker
-      - TP_SIZE=${TP_SIZE}
+      - CLUSTER_MODE=${CLUSTER_MODE:-dual-rdma}
+      - TP_SIZE=${TP_SIZE:-2}
       # ---- Multi-node networking (200Gbps RoCE) ----
+      # Worker is only meaningful with CLUSTER_MODE=dual-rdma; entrypoint.sh
+      # validates the RDMA vars are present.
       - NVIDIA_VISIBLE_DEVICES=all
-      - VLLM_HOST_IP=${WORKER_ROCE_IP}
-      - RAY_NODE_IP_ADDRESS=${WORKER_ROCE_IP}
-      - RAY_OVERRIDE_NODE_IP_ADDRESS=${WORKER_ROCE_IP}
-      - HEAD_ROCE_IP=${HEAD_ROCE_IP}
-      - WORKER_ROCE_IP=${WORKER_ROCE_IP}
-      - RAY_PORT=${RAY_PORT}
-      - NCCL_SOCKET_IFNAME=${ROCE_IF_NAME}
-      - GLOO_SOCKET_IFNAME=${ROCE_IF_NAME}
-      - UCX_NET_DEVICES=${ROCE_IF_NAME}
-      - NCCL_IB_HCA=${IB_HCA_NAME}
-      - NCCL_IB_DISABLE=0
-      - NCCL_DEBUG=INFO
+      - VLLM_HOST_IP=${WORKER_ROCE_IP:-}
+      - RAY_NODE_IP_ADDRESS=${WORKER_ROCE_IP:-}
+      - RAY_OVERRIDE_NODE_IP_ADDRESS=${WORKER_ROCE_IP:-}
+      - HEAD_ROCE_IP=${HEAD_ROCE_IP:-}
+      - WORKER_ROCE_IP=${WORKER_ROCE_IP:-}
+      - ROCE_IF_NAME=${ROCE_IF_NAME:-}
+      - IB_HCA_NAME=${IB_HCA_NAME:-}
+      - RAY_PORT=${RAY_PORT:-}
+      - NCCL_SOCKET_IFNAME=${ROCE_IF_NAME:-}
+      - GLOO_SOCKET_IFNAME=${ROCE_IF_NAME:-}
+      - UCX_NET_DEVICES=${ROCE_IF_NAME:-}
+      - NCCL_IB_HCA=${IB_HCA_NAME:-}
+      - NCCL_IB_DISABLE=${NCCL_IB_DISABLE:-0}
+      - NCCL_DEBUG=${NCCL_DEBUG:-WARN}
       - RAY_memory_monitor_refresh_ms=0
       # ---- Model-specific env vars (0 = disabled) ----
       - VLLM_MARLIN_USE_ATOMIC_ADD=${VLLM_MARLIN_USE_ATOMIC_ADD:-0}
