@@ -24,32 +24,41 @@ For release-by-release detail and patch-by-patch status, see
 
 ## Software Stack
 
-### v022-tx581 (NGC 26.04, vLLM v0.21.0, FlashInfer v0.6.11.post3, Transformers 5.8.1) — experimental forward-stack
+### v022-d568 (NGC 26.04, vLLM v0.21.0+#35568, FlashInfer 0.6.11.post3, Transformers 5.8.1, Triton 3.7.0, NCCL 2.30.4) — final forward-stack
 
-Stacked-upgrade image built on 2026-05-18 to validate the next round of dependency bumps on top of `v022-vllm021`. Each layer (`-fi0611` → `-ngc2604` → `-tx581`) was booted and verified against the PrismaSCOUT NVFP4 TP=2 preset (text + image inference, MTP n=3 speculative decoding). Use this image to dry-run the next base bump; the production default remains `v021-tq`.
+Stacked-upgrade image built 2026-05-18, the deepest in the v022 series. Each layer was booted and verified against the PrismaSCOUT NVFP4 TP=2 preset (text + image inference, MTP n=3); the final `-d568` layer was additionally verified against `wangzhang-122b-abliterix-fp8-tp2` to confirm the SM121 FP8 kernel path now activates. The production default remains `v021-tq`; use `v022-d568` to validate behavior on the released v0.21.0 plus the cherry-pick.
 
 | Component | Version |
 |---|---|
 | Base Image | NGC PyTorch **26.04-py3** |
-| vLLM | 0.21.0 (release tag, commit `ad7125a4`) |
+| vLLM | **0.21.0 + PR #35568** (release tag `ad7125a4` + cherry-pick of commit `06d020bb6`, source rebuild) |
 | FlashInfer | **v0.6.11.post3** (SM120/121 XQA MLA bug fixes #2689, CUTLASS Small Tile N Blockscaled GEMMs #3152, Blackwell GDN accuracy #3156, SM120 cuDNN NaN #3192, NVFP4 KV prefill #3097) |
 | PyTorch | **2.12.0a0** |
 | CUDA | 13.2 (native) |
 | Transformers | **5.8.1** |
-| Triton | 3.6.0 |
-| NCCL | 2.29.7 |
-| Image tag | `ghcr.io/bjk110/vllm-spark:v022-tx581` |
+| Triton | **3.7.0** (vanilla PyPI; NGC 26.04 still bundles 3.6.0) |
+| NCCL | **2.30.4** (runtime via `nvidia-nccl-cu13` pip + `LD_LIBRARY_PATH`; NGC 26.04 system NCCL stays at 2.29.7) |
+| tokenizers | 0.22.2 (Transformers 5.8.1 pins `<=0.23.0`; PyPI has no `0.23.0` stable, so 0.22.2 is the highest compatible) |
+| Image tag | `ghcr.io/bjk110/vllm-spark:v022-d568` |
 
 Intermediate stacked images (kept for bisection / rollback):
-- `ghcr.io/bjk110/vllm-spark:v022-fi0611` — v022-vllm021 + FlashInfer 0.6.11.post3 only
+- `ghcr.io/bjk110/vllm-spark:v022-fi0611` — v022-vllm021 + FlashInfer 0.6.11.post3
 - `ghcr.io/bjk110/vllm-spark:v022-ngc2604` — v022-fi0611 + NGC 26.04 (PyTorch 2.12.0a0) + `patch_split_module_compat.py`
+- `ghcr.io/bjk110/vllm-spark:v022-tx581` — v022-ngc2604 + Transformers 5.8.1
+- `ghcr.io/bjk110/vllm-spark:v022-trt37` — v022-tx581 + Triton 3.7.0
+- `ghcr.io/bjk110/vllm-spark:v022-nccl234` — v022-trt37 + NCCL 2.30.4
 
-**New runtime patch on `-ngc2604` and `-tx581`:** `patches/patch_split_module_compat.py` replaces vLLM's static `is_torch_equal_or_newer("2.12.0.dev")` gate around `torch.fx.passes.split_module.split_module(tuple_return=True)` with an `inspect.signature(...).parameters` probe. NGC 26.04 ships a PyTorch 2.12 alpha snapshot that predates the upstream `tuple_return` commit, so the version gate fires false-positive and PyTorch raises `TypeError`. The patch makes the gate self-correct.
+**Runtime patches added during the stack:**
+- `patches/patch_split_module_compat.py` (since `-ngc2604`): swaps vLLM's static `is_torch_equal_or_newer("2.12.0.dev")` gate around `torch.fx.passes.split_module.split_module(tuple_return=True)` for an `inspect.signature(...).parameters` probe. NGC 26.04 ships a PyTorch 2.12 alpha that predates the upstream `tuple_return` commit, so the version gate would otherwise fire false-positive and PyTorch would raise `TypeError`.
+- `patches/apply_sm121_fp8_pr35568.py` (only on `-d568`): build-time cherry-pick of vLLM PR #35568. Widens four `enable_sm120_only` / `arch in [89, 120]` gates to `SM12x family` in the Marlin/CUTLASS FP8 codepaths so the DGX Spark GB10 (SM121) is no longer excluded. Confirmed live by the abliterix-FP8 boot logging `Selected CutlassFP8ScaledMMLinearKernel for CompressedTensorsW8A8Fp8`.
 
 Verified preset overrides:
-- `models/qwen3.6-27b-prismascout-nvfp4-tp2-v022-fi0611.env`
-- `models/qwen3.6-27b-prismascout-nvfp4-tp2-v022-ngc2604.env`
-- `models/qwen3.6-27b-prismascout-nvfp4-tp2-v022-tx581.env`
+- `models/qwen3.6-27b-prismascout-nvfp4-tp2-v022-{fi0611,ngc2604,tx581,trt37,nccl234,d568}.env` — PrismaSCOUT NVFP4 (text + image)
+- `models/wangzhang-122b-abliterix-fp8-tp2-v022-d568.env` — abliterix FP8 (text, confirms FP8 kernel path activation)
+
+### v022-tx581 — intermediate (NGC 26.04, vLLM v0.21.0, FlashInfer v0.6.11.post3, Transformers 5.8.1)
+
+Intermediate image in the stacked-upgrade chain; superseded by `v022-trt37` → `v022-nccl234` → `v022-d568` above. Kept for bisection. Triton 3.6.0 / NCCL 2.29.7 here.
 
 ### v022-vllm021 (NGC 26.03, vLLM **v0.21.0** release-pinned)
 
@@ -140,10 +149,13 @@ docker pull ghcr.io/bjk110/vllm-spark:v021-tq
 # vLLM v0.21.0 release-pinned image (Dockerfile.v022, drops 3 absorbed patches)
 docker pull ghcr.io/bjk110/vllm-spark:v022-vllm021
 
-# Stacked-upgrade variants (2026-05-18 forward-stack tests; see Software Stack §v022-tx581)
+# Stacked-upgrade variants (2026-05-18 forward-stack tests; see Software Stack §v022-d568)
 docker pull ghcr.io/bjk110/vllm-spark:v022-fi0611    # + FlashInfer 0.6.11.post3
 docker pull ghcr.io/bjk110/vllm-spark:v022-ngc2604   # + NGC 26.04 (PyTorch 2.12.0a0)
-docker pull ghcr.io/bjk110/vllm-spark:v022-tx581     # + Transformers 5.8.1 (final stack)
+docker pull ghcr.io/bjk110/vllm-spark:v022-tx581     # + Transformers 5.8.1
+docker pull ghcr.io/bjk110/vllm-spark:v022-trt37     # + Triton 3.7.0
+docker pull ghcr.io/bjk110/vllm-spark:v022-nccl234   # + NCCL 2.30.4
+docker pull ghcr.io/bjk110/vllm-spark:v022-d568      # + vLLM PR#35568 SM121 FP8 cherry-pick (final)
 ```
 
 #### Option B: Build from source
@@ -162,6 +174,9 @@ docker buildx build -f Dockerfile.v022 \
 docker buildx build -f Dockerfile.v022-fi0611  -t vllm-spark:v022-fi0611  --load .
 docker buildx build -f Dockerfile.v022-ngc2604 -t vllm-spark:v022-ngc2604 --load .
 docker buildx build -f Dockerfile.v022-tx581   -t vllm-spark:v022-tx581   --load .
+docker buildx build -f Dockerfile.v022-trt37   -t vllm-spark:v022-trt37   --load .
+docker buildx build -f Dockerfile.v022-nccl234 -t vllm-spark:v022-nccl234 --load .
+docker buildx build -f Dockerfile.v022-d568    -t vllm-spark:v022-d568    --load .
 ```
 
 Build arguments:
