@@ -24,6 +24,33 @@ For release-by-release detail and patch-by-patch status, see
 
 ## Software Stack
 
+### v022-tx581 (NGC 26.04, vLLM v0.21.0, FlashInfer v0.6.11.post3, Transformers 5.8.1) — experimental forward-stack
+
+Stacked-upgrade image built on 2026-05-18 to validate the next round of dependency bumps on top of `v022-vllm021`. Each layer (`-fi0611` → `-ngc2604` → `-tx581`) was booted and verified against the PrismaSCOUT NVFP4 TP=2 preset (text + image inference, MTP n=3 speculative decoding). Use this image to dry-run the next base bump; the production default remains `v021-tq`.
+
+| Component | Version |
+|---|---|
+| Base Image | NGC PyTorch **26.04-py3** |
+| vLLM | 0.21.0 (release tag, commit `ad7125a4`) |
+| FlashInfer | **v0.6.11.post3** (SM120/121 XQA MLA bug fixes #2689, CUTLASS Small Tile N Blockscaled GEMMs #3152, Blackwell GDN accuracy #3156, SM120 cuDNN NaN #3192, NVFP4 KV prefill #3097) |
+| PyTorch | **2.12.0a0** |
+| CUDA | 13.2 (native) |
+| Transformers | **5.8.1** |
+| Triton | 3.6.0 |
+| NCCL | 2.29.7 |
+| Image tag | `ghcr.io/bjk110/vllm-spark:v022-tx581` |
+
+Intermediate stacked images (kept for bisection / rollback):
+- `ghcr.io/bjk110/vllm-spark:v022-fi0611` — v022-vllm021 + FlashInfer 0.6.11.post3 only
+- `ghcr.io/bjk110/vllm-spark:v022-ngc2604` — v022-fi0611 + NGC 26.04 (PyTorch 2.12.0a0) + `patch_split_module_compat.py`
+
+**New runtime patch on `-ngc2604` and `-tx581`:** `patches/patch_split_module_compat.py` replaces vLLM's static `is_torch_equal_or_newer("2.12.0.dev")` gate around `torch.fx.passes.split_module.split_module(tuple_return=True)` with an `inspect.signature(...).parameters` probe. NGC 26.04 ships a PyTorch 2.12 alpha snapshot that predates the upstream `tuple_return` commit, so the version gate fires false-positive and PyTorch raises `TypeError`. The patch makes the gate self-correct.
+
+Verified preset overrides:
+- `models/qwen3.6-27b-prismascout-nvfp4-tp2-v022-fi0611.env`
+- `models/qwen3.6-27b-prismascout-nvfp4-tp2-v022-ngc2604.env`
+- `models/qwen3.6-27b-prismascout-nvfp4-tp2-v022-tx581.env`
+
 ### v022-vllm021 (NGC 26.03, vLLM **v0.21.0** release-pinned)
 
 Forward-looking image built from `Dockerfile.v022`, pinned to the vLLM v0.21.0 release tag (`ad7125a4`). Three upstream-absorbed runtime patches drop out of the build (`aot_cache_fix.patch`, `fastsafetensors_natural_sort.patch`, `nogds_force.patch`). Preset overrides live alongside the base preset as `models/*-v022.env`. Use this image to validate behavior on the released v0.21.0 before bumping the default image off `95995bbe`.
@@ -112,6 +139,11 @@ docker pull ghcr.io/bjk110/vllm-spark:v021-tq
 
 # vLLM v0.21.0 release-pinned image (Dockerfile.v022, drops 3 absorbed patches)
 docker pull ghcr.io/bjk110/vllm-spark:v022-vllm021
+
+# Stacked-upgrade variants (2026-05-18 forward-stack tests; see Software Stack §v022-tx581)
+docker pull ghcr.io/bjk110/vllm-spark:v022-fi0611    # + FlashInfer 0.6.11.post3
+docker pull ghcr.io/bjk110/vllm-spark:v022-ngc2604   # + NGC 26.04 (PyTorch 2.12.0a0)
+docker pull ghcr.io/bjk110/vllm-spark:v022-tx581     # + Transformers 5.8.1 (final stack)
 ```
 
 #### Option B: Build from source
@@ -125,6 +157,11 @@ docker buildx build -f Dockerfile.gemma4 \
 # (build on spark01/spark02 only — homeserver 32GiB RAM is insufficient)
 docker buildx build -f Dockerfile.v022 \
   -t vllm-spark:v022-vllm021 --load .
+
+# Stacked-upgrade builds (each cached layer-by-layer; rebuild only the diff)
+docker buildx build -f Dockerfile.v022-fi0611  -t vllm-spark:v022-fi0611  --load .
+docker buildx build -f Dockerfile.v022-ngc2604 -t vllm-spark:v022-ngc2604 --load .
+docker buildx build -f Dockerfile.v022-tx581   -t vllm-spark:v022-tx581   --load .
 ```
 
 Build arguments:
