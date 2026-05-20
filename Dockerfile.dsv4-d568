@@ -2,56 +2,59 @@
 # =========================================================================
 # vLLM on NVIDIA DGX Spark (GB10, SM121) — DeepSeek-V4-Flash on v022-d568 base
 #
+# Originally based on the developer-forum-pinned jasl/vllm `dda4668b` recipe
+# (2026-05-13, "Restore rowwise paged-MQA logits kernel for SM12x long
+# context"), then intentionally advanced to `edc82b614f51` (branch HEAD,
+# 2026-05-19, +249 commits) to include later DSV4 MTP / SWA / SM12x fixes:
+#   - 662b07732d3e  Fix DeepSeek V4 MTP small-batch graph hangs
+#   - beb72fe2f050  Fix DeepSeek V4 MTP sparse SWA reordering
+#   - 296b5bff3aff  Fix SWA cache block mask breaking prefix caching with Eagle/MTP
+#   - 0e9bc3702e32  Remove ineffective DeepSeek V4 mHC warmup
+# Plus broad SM12x kernel tuning (FP8 MQA logits, sparse MLA accumulate
+# autotune, fp8_einsum/indexer num_warps tune, C128A KV gather overlap).
+# jasl validated these on RTX PRO 6000 (SM120 datacenter); we revalidate
+# end-to-end on GB10 (SM121 consumer).
+#
 # Stack:
 #   FROM ghcr.io/bjk110/vllm-spark:v022-d568
-#     (NGC 26.04 / PyTorch 2.12.0a0 / FlashInfer 0.6.11.post3 / Triton 3.7.0 /
-#      NCCL 2.30.4 / Transformers 5.8.1)
-#   + jasl/vllm @ dda4668b59567416f86956cfe7bbc1eab371a61e (2026-05-13,
-#     "Restore rowwise paged-MQA logits kernel for SM12x long context")
-#   + patches/apply_dsv4_packed_mapping.py (defensive — skips if jasl branch
+#     (NGC 26.04 / PyTorch 2.12.0a0 / FlashInfer 0.6.11.post3 / Triton 3.7.0
+#      / NCCL 2.30.4 / Transformers 5.8.1)
+#   + jasl/vllm @ edc82b614f51 (replaces v022-d568's vLLM 0.21.0+PR#35568)
+#   + patches/apply_dsv4_packed_mapping.py (defensive — skips if branch
 #     already defines packed_modules_mapping)
+#   + patches/patch_split_module_compat.py (re-applied after vLLM swap)
+#   + patches/moe_config_e256.json / e512.json (re-staged GB10 fused-MoE
+#     configs)
 #   + instanttensor (per eugr/spark-vllm-docker PR #219 recipe)
 #
-# Why pin dda4668b instead of the codex/ds4-sm120-min-enable branch HEAD:
-#   Per developer forum post #43 (2026-05-14): "pin the vLLM commit, don't use
-#   a branch alias — only the pinned commit has the GB10 validation behind it."
-#   The branch has since moved +249 / -18 from dda4668b without GB10 validation.
-#
-# Build (MUST run on spark01 or spark02 — NEVER on homeserver):
-#   docker buildx build -f Dockerfile.dsv4-d568 \
-#     -t vllm-spark:dsv4-d568 --load .
+# Build: build on a node with ≥48 GiB RAM (vLLM C++/CUDA compile is memory-
+# heavy). See docs/dsv4-flash-tp2.md §1.
 #
 # Verify:
 #   docker run --rm --gpus all vllm-spark:dsv4-d568 \
 #     /opt/scripts/verify_runtime.sh
 #
-# Reference: https://forums.developer.nvidia.com/t/.../370309 (post #43)
-# Reference: https://github.com/eugr/spark-vllm-docker/pull/219
+# References:
+#   - NVIDIA developer forum post #43:
+#       https://forums.developer.nvidia.com/t/.../370309
+#   - eugr/spark-vllm-docker PR #219 (DSV4 recipe)
 # =========================================================================
 
 ARG NGC_TAG=26.04-py3
 ARG BUILD_JOBS=16
 
-# Forum-pinned vLLM commit (GB10 validated)
+# jasl/vllm fork pinned by full SHA. See header for rationale on choosing
+# edc82b614f51 over the forum-pinned dda4668b.
 ARG VLLM_REPO_URL=https://github.com/jasl/vllm.git
 ARG VLLM_BRANCH=codex/ds4-sm120-min-enable
-# Bumped from dda4668b (2026-05-13, forum-pinned) to edc82b614f51 (2026-05-19,
-# branch HEAD, +249 commits). Key MTP fixes:
-#   - 662b07732d3e Fix DeepSeek V4 MTP small-batch graph hangs
-#   - beb72fe2f050 Fix DeepSeek V4 MTP sparse SWA reordering
-#   - 296b5bff3aff [Bugfix] Fix SWA cache block mask breaking prefix caching with Eagle/MTP
-#   - 0e9bc3702e32 Remove ineffective DeepSeek V4 mHC warmup
-# Plus extensive SM120/SM12x kernel tuning (FP8 MQA logits, sparse MLA accumulate
-# autotune, fp8_einsum/indexer num_warps tune, C128A KV gather overlap).
-# Not GB10-validated by jasl (his RTX PRO 6000 only); revalidate end-to-end.
 ARG VLLM_COMMIT=edc82b614f51f4f9ce16c7010e879571e5c46136
 
 ARG TORCH_CUDA_ARCH="12.1a"
 
 # =========================================================================
-# STAGE 1: vLLM Builder (jasl fork @ dda4668b)
+# STAGE 1: vLLM Builder (jasl fork @ edc82b614f51)
 #
-# We rebuild vLLM against NGC 26.04 (PyTorch 2.12.0a0) so the wheel ABI
+# Rebuilds vLLM against NGC 26.04 (PyTorch 2.12.0a0) so the wheel ABI
 # matches the v022-d568 runner. jasl's branch was developed against
 # NGC 26.03 / PyTorch 2.11; the PyTorch-2.12 compat patches from v022-d568
 # (split_module_compat, hoist-kwarg strip) are applied defensively.
@@ -118,7 +121,7 @@ RUN --mount=type=cache,id=ccache-dsv4-d568,target=/root/.ccache \
 FROM ghcr.io/bjk110/vllm-spark:v022-d568 AS runner
 
 LABEL org.opencontainers.image.source="https://github.com/bjk110/spark_vllm_docker"
-LABEL org.opencontainers.image.description="vLLM jasl@dda4668b (DeepSeek-V4-Flash) on v022-d568 (NGC 26.04 / FlashInfer 0.6.11.post3 / Triton 3.7.0 / NCCL 2.30.4 / Transformers 5.8.1) for DGX Spark GB10"
+LABEL org.opencontainers.image.description="vLLM jasl@edc82b614f51 (DeepSeek-V4-Flash) on v022-d568 (NGC 26.04 / FlashInfer 0.6.11.post3 / Triton 3.7.0 / NCCL 2.30.4 / Transformers 5.8.1) for DGX Spark GB10"
 LABEL org.opencontainers.image.licenses="Apache-2.0"
 
 ARG TORCH_CUDA_ARCH=12.1a
@@ -127,7 +130,7 @@ ENV TORCH_CUDA_ARCH_LIST=${TORCH_CUDA_ARCH}
 # Uninstall the v022-d568 vLLM (0.21.0+PR#35568) before installing the jasl wheel.
 RUN pip uninstall -y vllm 2>/dev/null || true
 
-# Install jasl/vllm@dda4668b wheel.
+# Install jasl/vllm wheel (edc82b614f51).
 RUN --mount=type=bind,from=vllm-builder,source=/workspace/wheels,target=/mount/vllm \
     pip install /mount/vllm/*.whl --no-deps && \
     python3 -c "import vllm; print(f'[vllm] {vllm.__version__} installed')" && \
@@ -145,11 +148,12 @@ RUN --mount=type=cache,id=uv-dsv4-d568,target=/root/.cache/uv \
     echo "[deps] partial resolve — runtime imports will surface anything critical"
 
 # instanttensor — listed in eugr/spark-vllm-docker PR #219 recipe.
+# Available on PyPI. Tolerated to fail: fastsafetensors (already installed
+# on the base image) is sufficient as a loader fallback.
 RUN --mount=type=cache,id=uv-dsv4-d568,target=/root/.cache/uv \
-    uv pip install --system instanttensor || \
-    echo "[deps] instanttensor not available on pypi — falling back to git" && \
-    uv pip install --system "instanttensor @ git+https://github.com/instantai/instanttensor.git" 2>/dev/null || \
-    echo "[deps] instanttensor unavailable — recipe may still work via fastsafetensors"
+    (uv pip install --system instanttensor && \
+     echo "[deps] instanttensor installed") || \
+    echo "[deps] instanttensor unavailable — recipe still works via fastsafetensors"
 
 # PyTorch 2.12.0a0 compat: vLLM's `is_torch_equal_or_newer("2.12.0.dev")` returns True
 # on NGC 26.04 PyTorch alpha, but that alpha predates the upstream `split_module(tuple_return=...)`

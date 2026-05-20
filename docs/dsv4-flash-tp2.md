@@ -1,7 +1,7 @@
 # DeepSeek-V4-Flash (Official FP8) — Dual-Spark TP=2 가이드
 
 `deepseek-ai/DeepSeek-V4-Flash` (공식 FP8 체크포인트) 를 DGX Spark 두 대
-(`spark01`, `spark02`) 위에서 TP=2 로 서빙하는 절차와 성능 측정 결과 정리.
+(`<head_node>`, `<worker_node>`) 위에서 TP=2 로 서빙하는 절차와 성능 측정 결과 정리.
 
 NVIDIA 개발자 포럼 [DeepSeek V4 Flash official FP8 running across 2× DGX Spark, TP=2, MTP, 200K ctx — recipe + numbers](https://forums.developer.nvidia.com/t/deepseek-v4-flash-official-fp8-running-across-2x-dgx-spark-tp-2-mtp-200k-ctx-recipe-numbers/370309) post #43 의 레시피를 기반으로, jasl/vllm 포크 + 우리 v022-d568 베이스 이미지로 재구성. 9가지 설정 조합을 벤치마크한 결과 우리 환경(GB10 / SM12.1a / 200 Gbps RoCE) 의 운영 최적값을 도출.
 
@@ -23,7 +23,7 @@ NVIDIA 개발자 포럼 [DeepSeek V4 Flash official FP8 running across 2× DGX S
 | Compose 파일 | `docker-compose.yml` (공용) |
 | Env 프리셋 | `models/dsv4-flash-fp8-tp2.env` |
 | 이미지 | `ghcr.io/bjk110/vllm-spark:dsv4-d568` |
-| 컨테이너 | `vllm-spark-head` (spark01) / `vllm-spark-worker` (spark02) |
+| 컨테이너 | `vllm-spark-head` (head 노드) / `vllm-spark-worker` (worker 노드) |
 
 ## 1. 이미지 빌드
 
@@ -158,7 +158,7 @@ GPU KV cache size: 1,919,636 tokens
 Maximum concurrency for 200,000 tokens per request: 9.60x
 ```
 
-200K 시퀀스 9.6 개 동시 보관 가능. `max_num_seqs=4` × 200K = 21% 풀 사용 (여유 많음).
+200K 시퀀스 9.6 개 동시 보관 가능. `max_num_seqs=4` × 200,000 ≈ 800K tokens — 1,919,636 token KV pool 의 **약 42%** 사용 (여유 큼).
 
 ## 4. 알려진 함정과 픽스
 
@@ -187,11 +187,19 @@ This may lead to suboptimal performance. Consider increasing max_num_batched_tok
 
 `MAX_NUM_BATCHED_TOKENS=8192` 로 올리면 경고 해소 + prefill 더 향상 (벤치 §6 참고). 단 KV pool 이 1.82M → 1.04M 으로 줄어들어 trade-off.
 
-### 4.4. Page cache 점유로 인한 GPU 메모리 부족
+### 4.4. `--attention_config.use_fp4_indexer_cache=True` 는 GB10 에서 활성화 불가
+
+jasl/vllm 의 `vllm/v1/attention/backends/mla/indexer.py` 가 이 옵션을 시도하면 *"requires Blackwell datacenter GPUs"* 검증을 수행. GB10 (SM121, consumer Blackwell) 은 datacenter 클래스가 아니므로 이 가드에 걸려 활성화 실패. 부팅 로그가 자동으로 `Using FP8 indexer cache for Lightning Indexer` 로 fallback 되는 것이 정상 동작. 따라서 `models/dsv4-flash-fp8-tp2.env` 에 이 플래그를 **추가하지 않음**. 환경변수 `VLLM_TRITON_MLA_SPARSE=1` 가 GB10 sparse MLA 활성화 경로의 핵심.
+
+### 4.5. Page cache 점유로 인한 GPU 메모리 부족
 
 증상: 부팅 중 `Free memory on device cuda:0 ... is less than desired GPU memory utilization`. GB10 unified memory 에서 OS page cache 가 가용 GPU 메모리에서 차감됨.
 
 수정: 위 §3.1 참고.
+
+### 4.6. KV pool 사용률 계산
+
+`MAX_MODEL_LEN=200000` × `MAX_NUM_SEQS=4` = 800,000 tokens 최악치, KV pool ≈ 1,919,636 tokens, **800,000 / 1,919,636 ≈ 41.7% (≈42%)** 사용. 안전 마진 큼. (이전 21% 표기는 오류였음.)
 
 ## 5. 백엔드 선택 (Ray vs mp)
 
@@ -200,13 +208,13 @@ This may lead to suboptimal performance. Consider increasing max_num_batched_tok
 | 항목 | `ray` (기본) | `mp` |
 |---|---|---|
 | 프로세스 모델 | Ray actor handle | torch.distributed SPMD |
-| 부트스트랩 | head Ray 시작 → worker `ray start --address` join → vLLM 기동 | head/worker 동시에 `vllm serve --nnodes 2 --node-rank N --master-addr ... --master-port ...` (worker 는 `--headless`) |
+| 부트스트랩 | head Ray 시작 → worker `ray start --address` join → vLLM 기동 | head/worker 동시에 `vllm serve --distributed-executor-backend mp --nnodes 2 --node-rank N --master-addr ... --master-port ...` (worker 는 `--headless`) |
 | 콜드 스타트 | 느림 (~30s Ray init 추가) | 빠름 |
 | 스텝 오버헤드 | Ray Compiled DAG (CUDAGraph + zero-copy IPC) | NCCL all-reduce 직접 |
-| 알려진 이슈 | cross-node Compiled DAG bug [#36237](https://github.com/vllm-project/vllm/issues/36237) — 일부 모델 cudagraph 깨짐 | (없음, vLLM 0.20+ 1-class 지원) |
-| DSV4 우리 환경 측정 | **Test C (§6) 참고** | **Test A (§6) — 차이 거의 없음** |
+| 알려진 이슈 | cross-node Compiled DAG bug [#36237](https://github.com/vllm-project/vllm/issues/36237) — 일부 모델 cudagraph 깨짐 | vLLM 0.20+ SPMD 1-class 지원, 명령 형태 안정화 중 (재검증 권장) |
+| DSV4 우리 환경 측정 | 본 문서 §6 Test #2/#7 (Ray, no-MTP) | §6 Test #5/#6/#8 (mp) |
 
-본 환경(GB10 SM12.1a + jasl@edc82b614f51) 측정상 **Ray vs mp 성능 차이는 무시할 만함** (peak t/s ±2%). Ray 권장 (기존 entrypoint 로직 그대로).
+본 환경(GB10 SM12.1a + jasl@edc82b614f51) 의 측정 범위(no-MTP, c=1-4 peak t/s) 안에서 **Ray 와 mp 의 decode peak 는 유사** (Test #2 68.00 vs Test #8 69.33, Test #7 66.67 vs Test #8 69.33). 더 강한 결론을 내리려면 latency 분포·prefill·다른 MTP 설정 등 추가 metric 비교가 필요합니다. 현재 운영 권장은 **Ray** (기존 entrypoint 로직 그대로, 회귀 risk 최소). **mp + MTP off** 도 유효한 후보이며 entrypoint 의 mp 명령 형태가 안정화된 뒤 재측정 권장.
 
 ## 6. 벤치마크 결과
 
@@ -221,7 +229,7 @@ This may lead to suboptimal performance. Consider increasing max_num_batched_tok
 | 측정 항목 | `pp 512/1024/2048` × `tg 32/128` × `concurrency 1/2/3/4` × 3 runs |
 | 결과 위치 | `benchmarks/llama-benchy/results_dsv4-flash-fp8-tp2-*.md` |
 
-`llama-benchy` 로컬 토크나이저는 `gpt2` 로 fallback (DSV4 tokenizer 가 `PreTrainedConfig.max_position_embeddings` 미지원). t/s 절대값은 ~10-18% 저평가 가능; 서버측 `peak t/s` 컬럼은 정확.
+`llama-benchy` 의 로컬 토크나이저는 `gpt2` 로 fallback (DSV4 tokenizer 가 `PreTrainedConfig.max_position_embeddings` 미지원). 이 때문에 클라이언트 측에서 표시되는 t/s 절대값과 다른 모델 간 직접 비교는 정밀하지 않습니다. 본 문서의 비교는 같은 클라이언트 토크나이저로 측정된 동일 모델 내 설정 간 상대 비교로 제한됩니다. 서버측 `peak t/s` 컬럼은 vLLM 이 직접 보고하므로 토크나이저 영향 없음.
 
 ### 6.2. 9-way 비교 (peak t/s)
 
@@ -282,9 +290,9 @@ This may lead to suboptimal performance. Consider increasing max_num_batched_tok
 |---|---:|---:|---:|
 | TTFT | 2,024 | 2,242 | 2,785 |
 
-## 7. MTP 가 우리 환경에서 손해인 이유
+## 7. MTP 가 본 측정에서 throughput 을 떨어뜨림
 
-DSV4-Flash 는 MTP heads (Multi-Token Prediction) 를 공식 체크포인트에 포함. 포럼 #43 보고는 ~44 t/s c=1 (decode warm) 달성, MTP 효과 추정. 우리 환경:
+DSV4-Flash 는 MTP heads (Multi-Token Prediction) 를 공식 체크포인트에 포함. 포럼 #43 보고는 ~44 t/s c=1 (decode warm) 달성, MTP 효과 추정. 본 환경 측정값:
 
 | 설정 | Decode c=1 peak | tg128 c=4 peak |
 |---|---:|---:|
@@ -298,12 +306,13 @@ DSV4-Flash 는 MTP heads (Multi-Token Prediction) 를 공식 체크포인트에 
 - Mean acceptance length: 2.14-2.50 tokens/step
 - Avg acceptance: 55-69%
 
-**손해 원인 추정:**
-1. GB10 SM12.1a 에서 draft forward (sparse MLA + Lightning Indexer + FP8 GEMM 풀가동) 비용이 H100 / RTX Pro 6000 대비 상대적으로 큼
-2. cross-node TP=2 에서 draft 도 양 노드 동기 실행 → 단일 노드 + TP=1 대비 sync 비용 증폭
-3. MTP step cost 가 acceptance gain 을 압도
+**관찰 — 본 GB10 TP=2 cross-node 측정에서 MTP 는 전반 throughput 을 떨어뜨림.** Acceptance rate 자체는 정상 범위지만 step time 이 늘어나서 net loss. 가능한 원인 (확정하려면 nsight / pytorch profiler 등으로 step breakdown 측정 필요):
 
-**대응 옵션 (미시도)**: jasl 가 별도로 준비 중인 "preview branch" (포럼 #43 jasl 본인 언급, 더 강한 GB10 최적화 포함 예정) 시점에 재시험.
+1. draft forward 오버헤드 (sparse MLA + Lightning Indexer + FP8 GEMM)
+2. cross-node TP 에서 draft step 의 NCCL 동기 비용 증폭
+3. cudagraph 동작 또는 acceptance gain 을 압도하는 fixed overhead
+
+**대응 옵션 (미시도)**: jasl 가 별도로 준비 중인 "preview branch" (포럼 #43 jasl 본인 언급, 더 강한 GB10 최적화 포함 예정) 시점에 재시험. 위 원인 가설은 profiling 없이는 확정할 수 없으므로 이후 작업으로 남겨둠.
 
 ## 8. Prefill 최고 기록 (설정 #9)
 

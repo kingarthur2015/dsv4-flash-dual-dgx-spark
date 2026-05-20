@@ -129,11 +129,13 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument(
         "--input",
-        default="/home/bjk110/Documents/Models/wangzhang/Qwen3.5-122B-A10B-abliterix",
+        required=True,
+        help="BF16 source model directory (e.g. ./models/wangzhang/Qwen3.5-122B-A10B-abliterix)",
     )
     ap.add_argument(
         "--output",
-        default="/home/bjk110/Documents/Models/wangzhang/Qwen3.5-122B-A10B-abliterix-FP8",
+        required=True,
+        help="Destination FP8 model directory",
     )
     ap.add_argument("--dry-run", action="store_true",
                     help="Scan and report counts without writing output")

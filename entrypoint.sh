@@ -16,23 +16,38 @@ fi
 #              forces VLLM_HOST_IP=127.0.0.1 and clears NCCL/GLOO/UCX
 #              interface bindings so vLLM/PyTorch c10d does not try to
 #              bind to a missing 10.10.10.x RoCE IP and hang.
-#   dual-rdma  Two DGX Sparks over 200 Gbps RoCE. Requires HEAD_ROCE_IP,
-#              WORKER_ROCE_IP, ROCE_IF_NAME, IB_HCA_NAME, RAY_PORT.
+#   dual-rdma  Two DGX Sparks over 200 Gbps RoCE. Backend chosen by
+#              DISTRIBUTED_BACKEND (ray default, mp optional).
 #
-# Role × TP_SIZE behavior:
-#   head    + TP_SIZE=1   → direct vllm serve, no Ray, single-rank c10d.
-#   head    + TP_SIZE>=2  → Ray head → wait for workers → vllm serve.
-#                           Requires CLUSTER_MODE=dual-rdma.
-#   worker  + (any)       → ray start --block. Requires CLUSTER_MODE=dual-rdma.
+# Backends (DISTRIBUTED_BACKEND, dual-rdma only):
+#   ray (default) — Ray actor mode. The established path for all existing
+#                   dual-rdma presets. Default to preserve regression safety.
+#   mp            — vLLM SPMD multi-node via torch.distributed. Head and
+#                   worker each run `vllm serve` with explicit
+#                   --distributed-executor-backend mp --nnodes --node-rank
+#                   --master-addr --master-port (worker adds --headless).
+#                   Supported as a no-Ray / forum-baseline path for testing.
 #
-# Required environment:
-#   ROLE                  - "head" or "worker" (compose profiles set this)
-#   MODEL_CONTAINER_PATH  - model path inside container
-#   SERVED_MODEL_NAME     - model name for API
+# Common required environment (any backend):
+#   ROLE                   "head" | "worker" (compose profiles set this)
+#   MODEL_CONTAINER_PATH   model path inside container
+#   SERVED_MODEL_NAME      model name for API
+#
+# Common dual-rdma required:
+#   HEAD_ROCE_IP WORKER_ROCE_IP ROCE_IF_NAME IB_HCA_NAME
+#
+# Ray-specific required (dual-rdma + DISTRIBUTED_BACKEND=ray):
+#   RAY_PORT
+#
+# mp-specific required (dual-rdma + DISTRIBUTED_BACKEND=mp):
+#   MASTER_PORT (default 29501)
+#   NNODES      (default TP_SIZE — implies 1 GPU/node)
+#   NODE_RANK   (default 0 for head, 1 for worker; or set explicitly)
+#   MASTER_ADDR (default HEAD_ROCE_IP — explicit override accepted)
 #
 # Optional (with sensible defaults):
-#   CLUSTER_MODE          - single (default) | dual-rdma
-#   TP_SIZE               - 1 (default) ; 2+ implies dual-rdma
+#   CLUSTER_MODE  single (default) | dual-rdma
+#   TP_SIZE       1 (default); 2+ implies dual-rdma
 #   HOST_PORT, MAX_MODEL_LEN, MAX_NUM_SEQS, GPU_MEMORY_UTILIZATION,
 #   MAX_NUM_BATCHED_TOKENS, VLLM_EXTRA_ARGS
 # =============================================================================
@@ -40,11 +55,6 @@ fi
 : "${ROLE:?ROLE must be set to 'head' or 'worker'}"
 : "${TP_SIZE:=1}"
 : "${CLUSTER_MODE:=single}"
-# DISTRIBUTED_BACKEND controls multi-node TP coordination when TP_SIZE>=2:
-#   ray (default) — Ray actors, head waits for workers via `ray status`
-#   mp            — vLLM SPMD: each node runs `vllm serve` with
-#                   --nnodes/--node-rank/--master-addr/--master-port,
-#                   workers add --headless. Matches forum/eugr no-ray path.
 : "${DISTRIBUTED_BACKEND:=ray}"
 : "${MASTER_PORT:=29501}"
 
@@ -84,17 +94,51 @@ case "${CLUSTER_MODE}" in
         echo "[entrypoint] CLUSTER_MODE=single: VLLM_HOST_IP=127.0.0.1, NCCL_IB_DISABLE=1, NCCL/GLOO/UCX ifname cleared"
         ;;
     dual-rdma)
-        # Validate the RDMA env compose passes through. Fail fast on missing
-        # values so we don't silently fall back to a broken default.
-        for v in HEAD_ROCE_IP WORKER_ROCE_IP ROCE_IF_NAME IB_HCA_NAME RAY_PORT; do
+        # Common RDMA networking vars — both ray and mp backends need these.
+        for v in HEAD_ROCE_IP WORKER_ROCE_IP ROCE_IF_NAME IB_HCA_NAME; do
             if [ -z "${!v:-}" ]; then
                 echo "[entrypoint] ERROR: CLUSTER_MODE=dual-rdma requires ${v} to be set in .env" >&2
                 exit 1
             fi
         done
+
+        # Backend-specific validation + defaulting.
+        case "${DISTRIBUTED_BACKEND}" in
+            ray)
+                if [ -z "${RAY_PORT:-}" ]; then
+                    echo "[entrypoint] ERROR: DISTRIBUTED_BACKEND=ray requires RAY_PORT to be set in .env" >&2
+                    exit 1
+                fi
+                ;;
+            mp)
+                # MASTER_ADDR defaults to HEAD_ROCE_IP if not set explicitly.
+                # NNODES defaults to TP_SIZE (1 GPU per node assumption for
+                # cross-node TP on DGX Spark — not data parallel).
+                # NODE_RANK defaults to 0 for head, 1 for worker.
+                : "${MASTER_ADDR:=${HEAD_ROCE_IP}}"
+                : "${NNODES:=${TP_SIZE}}"
+                if [ "${ROLE}" = "head" ]; then
+                    : "${NODE_RANK:=0}"
+                else
+                    : "${NODE_RANK:=1}"
+                fi
+                for v in MASTER_ADDR MASTER_PORT NNODES NODE_RANK; do
+                    if [ -z "${!v:-}" ]; then
+                        echo "[entrypoint] ERROR: DISTRIBUTED_BACKEND=mp requires ${v}" >&2
+                        exit 1
+                    fi
+                done
+                export MASTER_ADDR NNODES NODE_RANK MASTER_PORT
+                ;;
+            *)
+                echo "[entrypoint] ERROR: unknown DISTRIBUTED_BACKEND=${DISTRIBUTED_BACKEND} (expected ray | mp)" >&2
+                exit 1
+                ;;
+        esac
+
         # VLLM_HOST_IP / RAY_NODE_IP_ADDRESS are already set by compose
         # to HEAD_ROCE_IP (head) or WORKER_ROCE_IP (worker). Leave alone.
-        echo "[entrypoint] CLUSTER_MODE=dual-rdma: head=${HEAD_ROCE_IP} worker=${WORKER_ROCE_IP} iface=${ROCE_IF_NAME} hca=${IB_HCA_NAME}"
+        echo "[entrypoint] CLUSTER_MODE=dual-rdma backend=${DISTRIBUTED_BACKEND} head=${HEAD_ROCE_IP} worker=${WORKER_ROCE_IP} iface=${ROCE_IF_NAME} hca=${IB_HCA_NAME}"
         ;;
     *)
         echo "[entrypoint] ERROR: CLUSTER_MODE must be 'single' or 'dual-rdma', got '${CLUSTER_MODE}'" >&2
@@ -116,9 +160,9 @@ if [ "${ROLE}" = "worker" ]; then
                 --block
             ;;
         mp)
-            # SPMD: run vllm serve --headless on worker
-            # Flags from eugr/spark-vllm-docker launch-cluster.sh no-ray mode.
-            echo "[entrypoint] Starting vLLM MP WORKER (rank ${NODE_RANK:-1}) → ${HEAD_ROCE_IP}:${MASTER_PORT}"
+            # SPMD: each node runs `vllm serve`; worker adds --headless.
+            # Mirrors eugr/spark-vllm-docker launch-cluster.sh no-ray flag shape.
+            echo "[entrypoint] Starting vLLM MP WORKER (rank ${NODE_RANK}) → ${MASTER_ADDR}:${MASTER_PORT}"
             VLLM_CMD=(
                 vllm serve "${MODEL_CONTAINER_PATH}"
                 --served-model-name "${SERVED_MODEL_NAME}"
@@ -132,9 +176,10 @@ if [ "${ROLE}" = "worker" ]; then
                 --dtype auto
                 --enable-prefix-caching
                 --tensor-parallel-size "${TP_SIZE}"
-                --nnodes "${TP_SIZE}"
-                --node-rank "${NODE_RANK:-1}"
-                --master-addr "${HEAD_ROCE_IP}"
+                --distributed-executor-backend mp
+                --nnodes "${NNODES}"
+                --node-rank "${NODE_RANK}"
+                --master-addr "${MASTER_ADDR}"
                 --master-port "${MASTER_PORT}"
                 --headless
             )
@@ -200,12 +245,13 @@ if [ "${TP_SIZE}" -ge 2 ]; then
             ;;
         mp)
             # ---- MP SPMD head: torch.distributed rendezvous on MASTER_ADDR:MASTER_PORT ----
-            echo "[entrypoint] Starting vLLM MP HEAD (rank 0) ${HEAD_ROCE_IP}:${MASTER_PORT} (TP_SIZE=${TP_SIZE})"
+            echo "[entrypoint] Starting vLLM MP HEAD (rank ${NODE_RANK}) ${MASTER_ADDR}:${MASTER_PORT} (TP_SIZE=${TP_SIZE}, NNODES=${NNODES})"
             VLLM_CMD+=(
                 --tensor-parallel-size "${TP_SIZE}"
-                --nnodes "${TP_SIZE}"
-                --node-rank 0
-                --master-addr "${HEAD_ROCE_IP}"
+                --distributed-executor-backend mp
+                --nnodes "${NNODES}"
+                --node-rank "${NODE_RANK}"
+                --master-addr "${MASTER_ADDR}"
                 --master-port "${MASTER_PORT}"
             )
             ;;
