@@ -89,6 +89,10 @@ See [`CHANGELOG.md`](CHANGELOG.md) for release-by-release detail and [`PATCH_STA
 
 ## Supported Models
 
+The table below covers the currently shipped presets in `models/`. For the
+complete list, see [`models/`](models/) — each preset file documents its own
+recipe / image / topology in its header comment.
+
 | Preset | Model | Quantization / dtype | Topology | TP | Image | Notes |
 |---|---|---|---|---|---|---|
 | `gemma4-26b-a4b.env` | google/gemma-4-26B-A4B-it | BF16 MoE (26B/4B active) | single | 1 | v021-ngc2603 | — |
@@ -126,15 +130,17 @@ docker pull ghcr.io/bjk110/vllm-spark:v021-ngc2603
 docker pull ghcr.io/bjk110/vllm-spark:v021-tq
 
 # Final forward-stack image (NGC 26.04 + vLLM 0.21.0+PR#35568 + FlashInfer 0.6.11.post3
-# + Transformers 5.8.1 + Triton 3.7.0 + NCCL 2.30.4). Validated against
-# PrismaSCOUT NVFP4 TP=2 and abliterix-FP8 TP=2 on 2026-05-18, plus
-# abliterix-NVFP4 TP=2 (custom BF16 → NVFP4 W4A4 with fused-group shared
-# weight_global_scale) on 2026-05-19.
+# + Transformers 5.8.1 + Triton 3.7.0 + NCCL 2.30.4). General production base.
 # Manifest digest: sha256:88b544ed69476f3785ea7ce37fc8b99f0f064cc299eef35cda1535c68e7a9501
 docker pull ghcr.io/bjk110/vllm-spark:v022-d568
+
+# DeepSeek-V4-Flash derivative image (FROM v022-d568, vLLM replaced with
+# jasl/vllm @ edc82b614f51 for SM12x DSV4 support). DSV4-specific only.
+# See models/dsv4-flash-fp8-tp2.env and docs/dsv4-flash-tp2.md.
+docker pull ghcr.io/bjk110/vllm-spark:dsv4-d568
 ```
 
-**Intermediate stacked variants are local-build only** (kept on spark01/spark02 for bisection / rollback). Rebuild from source via the matching `Dockerfile.v022-*` if you need to bisect:
+**Intermediate stacked variants are local-build only** (kept on a build node for bisection / rollback). Rebuild from source via the matching `dockerfiles/Dockerfile.v022-*` if you need to bisect:
 
 | Tag | Dockerfile | Diff from previous layer |
 |---|---|---|
@@ -144,7 +150,8 @@ docker pull ghcr.io/bjk110/vllm-spark:v022-d568
 | `v022-tx581` | `dockerfiles/Dockerfile.v022-tx581` | Transformers 5.8.1 |
 | `v022-trt37` | `dockerfiles/Dockerfile.v022-trt37` | Triton 3.7.0 |
 | `v022-nccl234` | `dockerfiles/Dockerfile.v022-nccl234` | NCCL 2.30.4 (pip override) |
-| `v022-d568` | `Dockerfile.v022-d568` | vLLM PR #35568 cherry-pick (SM121 FP8) — **only this layer is on GHCR** |
+| `v022-d568` | `Dockerfile.v022-d568` | vLLM PR #35568 cherry-pick (SM121 FP8) — **on GHCR, general production base** |
+| `dsv4-d568` | `Dockerfile.dsv4-d568` | DeepSeek-V4-Flash derivative — `FROM v022-d568` + jasl/vllm @ `edc82b614f51` (DSV4-specific). **On GHCR.** |
 
 #### Option B: Build from source
 
@@ -164,7 +171,12 @@ docker buildx build -f dockerfiles/Dockerfile.v022-ngc2604 -t vllm-spark:v022-ng
 docker buildx build -f dockerfiles/Dockerfile.v022-tx581   -t vllm-spark:v022-tx581   --load .
 docker buildx build -f dockerfiles/Dockerfile.v022-trt37   -t vllm-spark:v022-trt37   --load .
 docker buildx build -f dockerfiles/Dockerfile.v022-nccl234 -t vllm-spark:v022-nccl234 --load .
+
+# Active top-level builds:
 docker buildx build -f Dockerfile.v022-d568    -t vllm-spark:v022-d568    --load .
+# DeepSeek-V4-Flash derivative (FROM v022-d568 + jasl/vllm@edc82b614f51).
+# Build on a Spark node; see docs/dsv4-flash-tp2.md §1.
+docker buildx build -f Dockerfile.dsv4-d568    -t vllm-spark:dsv4-d568    --load .
 ```
 
 Build arguments:
@@ -242,7 +254,7 @@ DISTRIBUTED_BACKEND=mp   # or ray (default)
 MASTER_PORT=29501        # only used in mp mode
 ```
 
-For DSV4 measurements showing Ray vs mp parity (±2% on our GB10 setup), see [`docs/dsv4-flash-tp2.md`](docs/dsv4-flash-tp2.md) §5.
+For DSV4 measurements, Ray and mp showed similar decode peak only in the measured no-MTP configuration on our GB10 setup. Stronger claims require additional latency, prefill, and stability metrics. See [`docs/dsv4-flash-tp2.md`](docs/dsv4-flash-tp2.md) §5 for the data.
 
 ### 3. Verify
 
@@ -327,16 +339,18 @@ spark01 (head)                    spark02 (worker)
 ### How the Entrypoint Works
 
 `entrypoint.sh` normalizes the environment based on `CLUSTER_MODE`, then
-dispatches on `ROLE` × `TP_SIZE`:
+dispatches on `ROLE` × `TP_SIZE` × `DISTRIBUTED_BACKEND` (dual-rdma only):
 
-| CLUSTER_MODE | ROLE | TP_SIZE | Behavior |
-|---|---|---|---|
-| `single`     | `head`   | 1   | Force `VLLM_HOST_IP=127.0.0.1`, clear NCCL/GLOO/UCX ifname, set `NCCL_IB_DISABLE=1`, then direct `vllm serve` (no Ray) |
-| `single`     | `head`   | 2+  | Fail-fast (`single` cannot host TP≥2) |
-| `single`     | `worker` | any | Fail-fast (worker is meaningless in single mode) |
-| `dual-rdma`  | `head`   | 1   | Reject (use `single` for TP=1) |
-| `dual-rdma`  | `head`   | 2+  | Validate RDMA env → Ray head → wait for workers → `vllm serve --distributed-executor-backend ray` |
-| `dual-rdma`  | `worker` | any | `ray start --address=$HEAD_ROCE_IP:$RAY_PORT --block` |
+| CLUSTER_MODE | ROLE | TP_SIZE | Backend | Behavior |
+|---|---|---|---|---|
+| `single` | `head` | 1 | — | Force `VLLM_HOST_IP=127.0.0.1`, clear NCCL/GLOO/UCX ifname, set `NCCL_IB_DISABLE=1`, then direct `vllm serve` (no Ray) |
+| `single` | `head` | 2+ | — | Fail-fast (`single` cannot host TP≥2) |
+| `single` | `worker` | any | — | Fail-fast (worker is meaningless in single mode) |
+| `dual-rdma` | `head` | 1 | — | Reject (use `single` for TP=1) |
+| `dual-rdma` | `head` | 2+ | `ray` (default) | Validate RDMA env + `RAY_PORT` → Ray head → wait for workers → `vllm serve --distributed-executor-backend ray` |
+| `dual-rdma` | `worker` | any | `ray` (default) | `ray start --address=$HEAD_ROCE_IP:$RAY_PORT --block` |
+| `dual-rdma` | `head` | 2+ | `mp` | Validate RDMA env + `MASTER_*`/`NNODES`/`NODE_RANK` (defaults: `MASTER_ADDR=$HEAD_ROCE_IP`, `MASTER_PORT=29501`, `NNODES=$TP_SIZE`, `NODE_RANK=0`) → `vllm serve --distributed-executor-backend mp --nnodes $NNODES --node-rank 0 --master-addr $MASTER_ADDR --master-port $MASTER_PORT` |
+| `dual-rdma` | `worker` | any | `mp` | `vllm serve --distributed-executor-backend mp --headless --nnodes $NNODES --node-rank 1 --master-addr $MASTER_ADDR --master-port $MASTER_PORT` |
 
 ### Repository Structure
 
@@ -689,11 +703,13 @@ this table when you need to reproduce or roll back to a specific image.
 
 | Image tag | Git ref (commit) | Stack | Notes |
 |---|---|---|---|
-| `v021-tq` (latest) | `3070f9a` | base + TQ patches + Inductor-graph-partition fix | Required for any `*-tq.env` preset |
-| `v021-ngc2603` (latest) | `8623187` | vLLM `95995bbe` + FlashInfer `v0.6.9` | Used by every non-TQ preset |
-| `v020-ngc2603` (transient) | `8efdf0b` (base-refresh-20260417 base bump) | vLLM `978a4462` + FlashInfer `v0.6.8` | Superseded by v021; only kept on GHCR for historical reproduction |
-| `v019-ngc2603` | `7736716` (Gemma 4 + vLLM 0.19.1 upgrade) | vLLM `0.19.1` `a7d79fa` + FlashInfer `v0.6.7.post3` | Superseded by v021 |
-| `v018-ngc2603` | `feb5993` (NGC 26.03 source build intro) — Git tag `v018-ngc2603` exists | vLLM `0.18.3` `c494977` + FlashInfer `v0.6.7` | The only currently-tagged release in Git |
+| `dsv4-d568` (active, DSV4-specific) | current HEAD | `FROM v022-d568` + jasl/vllm @ `edc82b614f51` | DeepSeek-V4-Flash derivative; used only by `models/dsv4-flash-fp8-tp2.env`. See [`docs/dsv4-flash-tp2.md`](docs/dsv4-flash-tp2.md). |
+| `v022-d568` (active, general base) | current HEAD | NGC 26.04 + vLLM 0.21.0+PR#35568 + FlashInfer 0.6.11.post3 + Triton 3.7.0 + NCCL 2.30.4 + Transformers 5.8.1 | General production base for v022-series presets and the dsv4-d568 derivative. |
+| `v021-tq` | `3070f9a` | base + TQ patches + Inductor-graph-partition fix | Required for any `*-tq.env` preset (production default for TurboQuant presets). |
+| `v021-ngc2603` | `8623187` | vLLM `95995bbe` + FlashInfer `v0.6.9` | Production default for non-TQ presets (most `models/*.env` files reference this). |
+| `v020-ngc2603` (superseded) | `8efdf0b` (base-refresh-20260417 base bump) | vLLM `978a4462` + FlashInfer `v0.6.8` | Superseded by v021; only kept on GHCR for historical reproduction. |
+| `v019-ngc2603` (superseded) | `7736716` (Gemma 4 + vLLM 0.19.1 upgrade) | vLLM `0.19.1` `a7d79fa` + FlashInfer `v0.6.7.post3` | Superseded by v021. |
+| `v018-ngc2603` (archive) | `feb5993` (NGC 26.03 source build intro) — Git tag `v018-ngc2603` exists | vLLM `0.18.3` `c494977` + FlashInfer `v0.6.7` | The only currently-tagged release in Git. |
 
 ### Recommended Git tags to create
 

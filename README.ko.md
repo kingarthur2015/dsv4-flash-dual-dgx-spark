@@ -80,6 +80,8 @@ v022-d568 의 vLLM 을 **jasl/vllm @ `edc82b614f51`** (branch `codex/ds4-sm120-m
 
 ## 지원 모델
 
+아래 표는 `models/` 에 현재 들어있는 프리셋입니다. 전체 목록은 [`models/`](models/) 참고 — 각 `.env` 파일의 헤더 코멘트에 recipe/이미지/토폴로지가 정리되어 있습니다.
+
 | 프리셋 | 모델 | 양자화 / dtype | 토폴로지 | TP | 이미지 | 비고 |
 |---|---|---|---|---|---|---|
 | `gemma4-26b-a4b.env` | google/gemma-4-26B-A4B-it | BF16 MoE (26B/4B active) | single | 1 | v021-ngc2603 | — |
@@ -109,19 +111,31 @@ v022-d568 의 vLLM 을 **jasl/vllm @ `edc82b614f51`** (branch `codex/ds4-sm120-m
 #### 방법 A: GHCR에서 빌드된 이미지 Pull
 
 ```bash
-# 기본 이미지 (모든 모델, TQ 패치 미포함)
+# 일반 production base (NGC 26.04 + vLLM 0.21.0+PR#35568 forward-stack)
+docker pull ghcr.io/bjk110/vllm-spark:v022-d568
+
+# DeepSeek-V4-Flash 전용 파생 이미지 (FROM v022-d568 + jasl/vllm@edc82b614f51).
+# DSV4 외에는 사용하지 마세요. 자세한 가이드: docs/dsv4-flash-tp2.md
+docker pull ghcr.io/bjk110/vllm-spark:dsv4-d568
+
+# 비-TQ 프리셋의 운영 기본 이미지 (대부분 models/*.env 의 이미지 컬럼)
 docker pull ghcr.io/bjk110/vllm-spark:v021-ngc2603
 
-# TurboQuant 이미지 (기본 + 하이브리드 모델 TQ 버그픽스 패치)
+# TurboQuant 프리셋 (*-tq.env) 전용 이미지
 docker pull ghcr.io/bjk110/vllm-spark:v021-tq
 ```
 
 #### 방법 B: 소스에서 빌드
 
 ```bash
-# NGC 26.03 소스 빌드 (vLLM main, TurboQuant 포함)
-docker buildx build -f dockerfiles/Dockerfile.gemma4 \
-  -t vllm-spark:v021-ngc2603 --load .
+# 현재 활성 빌드 (top-level Dockerfile):
+docker buildx build -f Dockerfile.v022-d568 -t vllm-spark:v022-d568 --load .
+# DeepSeek-V4-Flash 파생 (Spark 노드에서만 빌드, docs/dsv4-flash-tp2.md §1):
+docker buildx build -f Dockerfile.dsv4-d568 -t vllm-spark:dsv4-d568 --load .
+
+# 레거시 빌드는 dockerfiles/ 아래로 이동됨 (bisection / 재현용):
+docker buildx build -f dockerfiles/Dockerfile.gemma4 -t vllm-spark:v021-ngc2603 --load .
+# 외 dockerfiles/Dockerfile.v022(-fi0611/-ngc2604/-tx581/-trt37/-nccl234) 동일 패턴
 ```
 
 빌드 인자:
@@ -199,7 +213,7 @@ DISTRIBUTED_BACKEND=mp   # 또는 ray (기본)
 MASTER_PORT=29501        # mp 모드에서만 사용
 ```
 
-DSV4 측정에서 GB10 환경 Ray vs mp 성능 차이 ±2% — 자세한 비교는 [`docs/dsv4-flash-tp2.md`](docs/dsv4-flash-tp2.md) §5 참조.
+DSV4 측정에서, Ray 와 mp 의 decode peak 는 본 GB10 환경의 no-MTP 구성에서만 유사하게 관찰됐습니다. 더 강한 결론을 내리려면 latency 분포 / prefill / 안정성 등 추가 metric 비교가 필요합니다. 자세한 데이터는 [`docs/dsv4-flash-tp2.md`](docs/dsv4-flash-tp2.md) §5 참조.
 
 ### 3. 동작 확인
 
@@ -283,16 +297,18 @@ spark01 (head)                    spark02 (worker)
 
 ### 엔트리포인트 동작 방식
 
-`entrypoint.sh`는 `CLUSTER_MODE`에 따라 환경변수를 정규화한 다음 `ROLE` × `TP_SIZE`로 분기합니다:
+`entrypoint.sh`는 `CLUSTER_MODE`에 따라 환경변수를 정규화한 다음 `ROLE` × `TP_SIZE` × `DISTRIBUTED_BACKEND` (dual-rdma 만 해당) 로 분기합니다:
 
-| CLUSTER_MODE | ROLE | TP_SIZE | 동작 |
-|---|---|---|---|
-| `single`     | `head`   | 1   | `VLLM_HOST_IP=127.0.0.1` 강제, NCCL/GLOO/UCX ifname 제거, `NCCL_IB_DISABLE=1`, 그 후 `vllm serve` 직접 실행 (Ray 없음) |
-| `single`     | `head`   | 2+  | Fail-fast (`single`은 TP≥2를 호스팅 불가) |
-| `single`     | `worker` | any | Fail-fast (단일 모드에서 worker는 의미 없음) |
-| `dual-rdma`  | `head`   | 1   | 거부 (TP=1은 `single`을 사용) |
-| `dual-rdma`  | `head`   | 2+  | RDMA 환경변수 검증 → Ray head → 워커 대기 → `vllm serve --distributed-executor-backend ray` |
-| `dual-rdma`  | `worker` | any | `ray start --address=$HEAD_ROCE_IP:$RAY_PORT --block` |
+| CLUSTER_MODE | ROLE | TP_SIZE | Backend | 동작 |
+|---|---|---|---|---|
+| `single` | `head` | 1 | — | `VLLM_HOST_IP=127.0.0.1` 강제, NCCL/GLOO/UCX ifname 제거, `NCCL_IB_DISABLE=1`, `vllm serve` 직접 실행 (Ray 없음) |
+| `single` | `head` | 2+ | — | Fail-fast (`single`은 TP≥2 호스팅 불가) |
+| `single` | `worker` | any | — | Fail-fast (단일 모드에서 worker 의미 없음) |
+| `dual-rdma` | `head` | 1 | — | 거부 (TP=1은 `single` 사용) |
+| `dual-rdma` | `head` | 2+ | `ray` (기본) | RDMA env + `RAY_PORT` 검증 → Ray head 시작 → worker join 대기 → `vllm serve --distributed-executor-backend ray` |
+| `dual-rdma` | `worker` | any | `ray` (기본) | `ray start --address=$HEAD_ROCE_IP:$RAY_PORT --block` |
+| `dual-rdma` | `head` | 2+ | `mp` | RDMA env + `MASTER_*`/`NNODES`/`NODE_RANK` 검증 (기본: `MASTER_ADDR=$HEAD_ROCE_IP`, `MASTER_PORT=29501`, `NNODES=$TP_SIZE`, `NODE_RANK=0`) → `vllm serve --distributed-executor-backend mp --nnodes $NNODES --node-rank 0 --master-addr $MASTER_ADDR --master-port $MASTER_PORT` |
+| `dual-rdma` | `worker` | any | `mp` | `vllm serve --distributed-executor-backend mp --headless --nnodes $NNODES --node-rank 1 --master-addr $MASTER_ADDR --master-port $MASTER_PORT` |
 
 ### 리포지토리 구조
 
@@ -645,11 +661,13 @@ GHCR 이미지 태그(`ghcr.io/bjk110/vllm-spark:<tag>`)와 Git 태그는 아직
 
 | 이미지 태그 | Git ref (commit) | 스택 | 비고 |
 |---|---|---|---|
-| `v021-tq` (최신) | `3070f9a` | base + TurboQuant 패치 + Inductor graph partition fix | 모든 `*-tq.env` 프리셋이 사용 |
-| `v021-ngc2603` (최신) | `8623187` | vLLM `95995bbe` + FlashInfer `v0.6.9` | TQ 미사용 프리셋 전체가 사용 |
-| `v020-ngc2603` (전환기) | `8efdf0b` (base-refresh-20260417 base bump) | vLLM `978a4462` + FlashInfer `v0.6.8` | v021로 대체됨; 재현용으로만 GHCR에 유지 |
-| `v019-ngc2603` | `7736716` (Gemma 4 + vLLM 0.19.1 업그레이드) | vLLM `0.19.1` `a7d79fa` + FlashInfer `v0.6.7.post3` | v021로 대체됨 |
-| `v018-ngc2603` | `feb5993` (NGC 26.03 source build 시작) — Git 태그 `v018-ngc2603` 존재 | vLLM `0.18.3` `c494977` + FlashInfer `v0.6.7` | 현재 Git에 존재하는 유일한 릴리스 태그 |
+| `dsv4-d568` (활성, DSV4 전용) | 현재 HEAD | `FROM v022-d568` + jasl/vllm @ `edc82b614f51` | DeepSeek-V4-Flash 파생; `models/dsv4-flash-fp8-tp2.env` 전용. 자세한 가이드 [`docs/dsv4-flash-tp2.md`](docs/dsv4-flash-tp2.md). |
+| `v022-d568` (활성, 일반 base) | 현재 HEAD | NGC 26.04 + vLLM 0.21.0+PR#35568 + FlashInfer 0.6.11.post3 + Triton 3.7.0 + NCCL 2.30.4 + Transformers 5.8.1 | v022-계열 프리셋 + dsv4-d568 파생의 일반 production base. |
+| `v021-tq` | `3070f9a` | base + TurboQuant 패치 + Inductor graph partition fix | 모든 `*-tq.env` 프리셋이 사용 (TurboQuant production default). |
+| `v021-ngc2603` | `8623187` | vLLM `95995bbe` + FlashInfer `v0.6.9` | 비-TQ 프리셋의 production default (대부분 `models/*.env` 가 참조). |
+| `v020-ngc2603` (대체됨) | `8efdf0b` (base-refresh-20260417 base bump) | vLLM `978a4462` + FlashInfer `v0.6.8` | v021로 대체됨; 재현용으로만 GHCR에 유지. |
+| `v019-ngc2603` (대체됨) | `7736716` (Gemma 4 + vLLM 0.19.1 업그레이드) | vLLM `0.19.1` `a7d79fa` + FlashInfer `v0.6.7.post3` | v021로 대체됨. |
+| `v018-ngc2603` (아카이브) | `feb5993` (NGC 26.03 source build 시작) — Git 태그 `v018-ngc2603` 존재 | vLLM `0.18.3` `c494977` + FlashInfer `v0.6.7` | 현재 Git에 존재하는 유일한 릴리스 태그. |
 
 ### 권장 Git 태그 (생성 가이드)
 

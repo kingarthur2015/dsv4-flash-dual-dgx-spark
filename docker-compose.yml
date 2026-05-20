@@ -31,7 +31,6 @@ services:
       # ---- Model-specific env vars (0 = disabled) ----
       - VLLM_MARLIN_USE_ATOMIC_ADD=${VLLM_MARLIN_USE_ATOMIC_ADD:-0}
       - VLLM_USE_FLASHINFER_MOE_FP4=${VLLM_USE_FLASHINFER_MOE_FP4:-0}
-      - VLLM_NVFP4_MOE_FORCE_MARLIN=${VLLM_NVFP4_MOE_FORCE_MARLIN:-0}
       # ---- DeepSeek-V4 Flash specific (empty = unset, no effect on other models) ----
       - VLLM_ALLOW_LONG_MAX_MODEL_LEN=${VLLM_ALLOW_LONG_MAX_MODEL_LEN:-}
       - VLLM_TRITON_MLA_SPARSE=${VLLM_TRITON_MLA_SPARSE:-}
@@ -133,7 +132,6 @@ services:
       # ---- Model-specific env vars (0 = disabled) ----
       - VLLM_MARLIN_USE_ATOMIC_ADD=${VLLM_MARLIN_USE_ATOMIC_ADD:-0}
       - VLLM_USE_FLASHINFER_MOE_FP4=${VLLM_USE_FLASHINFER_MOE_FP4:-0}
-      - VLLM_NVFP4_MOE_FORCE_MARLIN=${VLLM_NVFP4_MOE_FORCE_MARLIN:-0}
       # ---- DeepSeek-V4 Flash specific (empty = unset, no effect on other models) ----
       - VLLM_ALLOW_LONG_MAX_MODEL_LEN=${VLLM_ALLOW_LONG_MAX_MODEL_LEN:-}
       - VLLM_TRITON_MLA_SPARSE=${VLLM_TRITON_MLA_SPARSE:-}
