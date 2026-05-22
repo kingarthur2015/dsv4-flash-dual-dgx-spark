@@ -331,7 +331,42 @@ DSV4-Flash 는 MTP heads (Multi-Token Prediction) 를 공식 체크포인트에 
 | 긴 컨텍스트 prefill 빈도 높음 | **설정 #9** (peak 1100 t/s prefill, decode 40 t/s) |
 | 다중 동시 사용자 + 짧은 답변 | 설정 #7 (max_seq 더 올릴 여지) |
 
-## 9. 참고 링크
+## 9. Tier-1 env tuning evaluation (negative finding, 2026-05-22)
+
+NVIDIA 개발자 포럼 [post #53 Serapis](https://forums.developer.nvidia.com/t/deepseek-v4-flash-official-fp8-running-across-2x-dgx-spark-tp-2-mtp-200k-ctx-recipe-numbers/370309/53) 의 2× DGX Spark TP=2 recipe 에서 권장된 두 env 변수를 우리 환경(jasl/vllm @ `edc82b614f51`, 설정 #9 baseline) 에 적용 후 A/B 측정. **두 변수 모두 운영 best 에 추가하지 않음.**
+
+### 9.1. 시험 대상
+
+| 변수 | forum 권장값 | 효과 가설 |
+|---|---|---|
+| `OMP_NUM_THREADS=8` | 8 | PyTorch CPU thread pool 캡으로 GPU dispatch 와의 contention 감소 |
+| `VLLM_USE_FLASHINFER_SAMPLER=1` | 1 | sampling 단계를 FlashInfer 로 라우팅 (PyTorch native 대체) |
+
+### 9.2. 측정 (server-reported peak/prefill, pp2048, Test #9 baseline)
+
+| Run | Config | Decode peak (c4 tg128) | Prefill (c4 tg128) | Δ vs A |
+|---|---|---:|---:|---:|
+| A | baseline (Test #9, no env tweak) | 40.00 | **1099.94 ± 4** | — |
+| B | + OMP=8 + SAMPLER=1 | 40.00 | 987.69 ± 123 | **−10.2%** prefill |
+| C | + OMP=8 only (SAMPLER=0) | 40.00 | 999.36 ± 102 | **−9.1%** prefill |
+
+### 9.3. 결론
+
+- **`OMP_NUM_THREADS=8` 이 prefill 회귀의 주범** (run C). GB10 의 20-core CPU 를 8 thread 로 축소하면 chunked-prefill admission path 가 CPU 병목. forum #53 의 RTX PRO 6000 (다른 코어 구조) 권장값이 GB10 에 부적합.
+- **`VLLM_USE_FLASHINFER_SAMPLER=1` 은 거의 중립** (B vs C 차이 ~1%, σ 범위). 본 벤치는 temperature=0 기본 → sampler 경로가 가벼움. greedy 워크로드에서 의미 없음.
+- **Decode peak (40 t/s) 는 세 run 모두 동일** — GPU-bound 영역이라 CPU 측 변경에 무영향.
+
+→ `models/dsv4-flash-fp8-tp2.env` 와 `docker-compose.yml` 에서 두 변수 모두 제거. 본 negative finding 은 동일 시도 재발 방지용 기록.
+
+### 9.4. 결과 파일
+
+| 설정 | 파일 |
+|---|---|
+| Run A (baseline) | `benchmarks/llama-benchy/results_dsv4-flash-fp8-tp2-edc82b6-ray-maxseq4-mtp2-bt8192-c1to4.md` (= 설정 #9) |
+| Run B (OMP+SAMPLER) | `benchmarks/llama-benchy/results_dsv4-flash-fp8-tp2-edc82b6-ray-maxseq4-mtp2-bt8192-OMP8-flashsampler-c1to4.md` |
+| Run C (OMP only) | `benchmarks/llama-benchy/results_dsv4-flash-fp8-tp2-edc82b6-ray-maxseq4-mtp2-bt8192-OMP8-only-c1to4.md` |
+
+## 10. 참고 링크
 
 - NVIDIA 개발자 포럼 [post #43](https://forums.developer.nvidia.com/t/deepseek-v4-flash-official-fp8-running-across-2x-dgx-spark-tp-2-mtp-200k-ctx-recipe-numbers/370309/43)
 - eugr/spark-vllm-docker [PR #219 (DeepSeek V4 Flash recipe)](https://github.com/eugr/spark-vllm-docker/pull/219)
