@@ -341,22 +341,25 @@ NVIDIA 개발자 포럼 [post #53 Serapis](https://forums.developer.nvidia.com/t
 |---|---|---|
 | `OMP_NUM_THREADS=8` | 8 | PyTorch CPU thread pool 캡으로 GPU dispatch 와의 contention 감소 |
 | `VLLM_USE_FLASHINFER_SAMPLER=1` | 1 | sampling 단계를 FlashInfer 로 라우팅 (PyTorch native 대체) |
+| `--disable-custom-all-reduce` | enable | vLLM custom all-reduce kernel 비활성, NCCL 기본 경로 사용 |
 
 ### 9.2. 측정 (server-reported peak/prefill, pp2048, Test #9 baseline)
 
 | Run | Config | Decode peak (c4 tg128) | Prefill (c4 tg128) | Δ vs A |
 |---|---|---:|---:|---:|
-| A | baseline (Test #9, no env tweak) | 40.00 | **1099.94 ± 4** | — |
+| A | baseline (Test #9, no env tweak) | 40.00 ± 0 | **1099.94 ± 4** | — |
 | B | + OMP=8 + SAMPLER=1 | 40.00 | 987.69 ± 123 | **−10.2%** prefill |
 | C | + OMP=8 only (SAMPLER=0) | 40.00 | 999.36 ± 102 | **−9.1%** prefill |
+| D | + `--disable-custom-all-reduce` | 41.33 ± 1.89 | 868.37 ± 157 | **−21.1%** prefill, σ ×40 |
 
 ### 9.3. 결론
 
 - **`OMP_NUM_THREADS=8` 이 prefill 회귀의 주범** (run C). GB10 의 20-core CPU 를 8 thread 로 축소하면 chunked-prefill admission path 가 CPU 병목. forum #53 의 RTX PRO 6000 (다른 코어 구조) 권장값이 GB10 에 부적합.
 - **`VLLM_USE_FLASHINFER_SAMPLER=1` 은 거의 중립** (B vs C 차이 ~1%, σ 범위). 본 벤치는 temperature=0 기본 → sampler 경로가 가벼움. greedy 워크로드에서 의미 없음.
-- **Decode peak (40 t/s) 는 세 run 모두 동일** — GPU-bound 영역이라 CPU 측 변경에 무영향.
+- **`--disable-custom-all-reduce` 는 prefill peak (c=4) 손상** (run D). σ 4 → 157 로 variance 40배 증가. vLLM custom all-reduce kernel 이 우리 GB10 + 200 Gbps RoCE + TP=2 cross-node 구성에 잘 최적화되어 있음. forum #53 의 권장은 다른 토폴로지 기준.
+- **Decode peak 는 모든 run 에서 ≈40 t/s** — GPU-bound 영역이라 CPU/통신 측 env 변경에 무영향.
 
-→ `models/dsv4-flash-fp8-tp2.env` 와 `docker-compose.yml` 에서 두 변수 모두 제거. 본 negative finding 은 동일 시도 재발 방지용 기록.
+→ 세 변경 모두 `models/dsv4-flash-fp8-tp2.env` 와 `docker-compose.yml` 에 적용하지 않음. 본 negative finding 은 동일 시도 재발 방지용 기록.
 
 ### 9.4. 결과 파일
 
@@ -365,6 +368,7 @@ NVIDIA 개발자 포럼 [post #53 Serapis](https://forums.developer.nvidia.com/t
 | Run A (baseline) | `benchmarks/llama-benchy/results_dsv4-flash-fp8-tp2-edc82b6-ray-maxseq4-mtp2-bt8192-c1to4.md` (= 설정 #9) |
 | Run B (OMP+SAMPLER) | `benchmarks/llama-benchy/results_dsv4-flash-fp8-tp2-edc82b6-ray-maxseq4-mtp2-bt8192-OMP8-flashsampler-c1to4.md` |
 | Run C (OMP only) | `benchmarks/llama-benchy/results_dsv4-flash-fp8-tp2-edc82b6-ray-maxseq4-mtp2-bt8192-OMP8-only-c1to4.md` |
+| Run D (no-custom-allreduce) | `benchmarks/llama-benchy/results_dsv4-flash-fp8-tp2-edc82b6-ray-maxseq4-mtp2-bt8192-no-custom-allreduce-c1to4.md` |
 
 ## 10. 참고 링크
 
