@@ -445,12 +445,23 @@ desired GPU memory utilization (0.85, 103.38 GiB).
 ### 11.5. 결정
 `edc82b614f51` 유지. 이미지 `vllm-spark:dsv4-d568-dad6ff8` 는 spark01/02 로컬에 남겨두되 `.env` 미참조. dad6ff8 단독 디버깅(또는 `request_memory()` 우회 패치)은 별도 세션.
 
-### 11.6. 후속 검증 (2026-05-23 G6)
+### 11.6. 후속 검증 (2026-05-23 G6 + G7)
+**§11.1-11.5 의 "dad6ff8 strict free-memory check" 가설은 G7 검증으로 무효화됨.** 진짜 root cause 는 commit 차이가 아니다.
+
 원인 가설 점검 결과:
-- `request_memory()` (`vllm/v1/worker/utils.py:413`), `MemorySnapshot.measure()` (`vllm/utils/mem_utils.py`), `is_integrated_gpu()` (`vllm/platforms/cuda.py`), `gpu_worker.init_device()` 부근 — **edc82b614f51 ↔ dad6ff885838 라인-identical**. 즉 거부 차이는 코드 변경 아님.
-- 깨끗한 reboot 후 (호스트 psutil available 117 GiB) 깨끗한 dad6ff8 재시도 → **동일 거부 deterministic 재현**. host RAM 풍요와 무관 = 컨테이너 시작 직후 CUDA/nvidia driver pre-reserve 가 즉시 발생 (dependency 차이 또는 NCCL buffer 크기 추정, 미특정).
-- 따라서 단순 env-var skip 패치는 가중치 로드 단계에서 OOM 으로 surface 될 가능성 → 의미 없음. dad6ff8 자체 채택은 **dependency diff / NCCL init 메모리 측정 / jasl c79225692 (+153 commits) 재검증** 중 하나가 선행돼야 함.
-- 부수 발견: docker compose v2 `restart: "on-failure:N"` 의 max-retries 부분이 **swarm-only 로 처리되어 일반 deploy 에서 무시됨**. 결과적으로 무한 재시작 = `unless-stopped` 와 동일 → sshd-storm 재발. `restart: "no"` 로 강화 (commit `4b848a1`). 재시작이 필요하면 `docker compose up -d` 수동 호출.
+- `request_memory()` (`vllm/v1/worker/utils.py:413`), `MemorySnapshot.measure()` (`vllm/utils/mem_utils.py`), `is_integrated_gpu()` (`vllm/platforms/cuda.py`), `gpu_worker.init_device()` 부근 — **edc82b614f51 ↔ dad6ff885838 라인-identical** (G6).
+- **G7 결정적 finding (2026-05-23 15:00)**: 운영 복귀 시도 중 **edc82b6 도 동일 ValueError 거부** (`Free memory 36.85/121.63 GiB`). 즉 dad6ff8 vs edc82b6 차이가 아니라 **reboot 후 경과 시간** 이 진짜 root cause.
+  - reboot 직후 (uptime 2분): host RAM free 117 GiB, psutil available 117 GiB → **통과**
+  - 시간 경과 (uptime 14분): host RAM used 78 GiB / available 42 GiB → **거부** (요구 103 GiB 미달)
+- 우리 이전 "edc82b6 정상" 운영 사례는 모두 reboot 직후 즉시 시작이었음. jasl/vllm version 과 무관한 **GB10 UMA platform-wide issue**.
+- 메커니즘: nvidia driver / kernel buffers (buff/cache 포함) / nx server / dockerd 등 user-space + kernel-side process 가 reboot 후 시간 지남에 따라 host RAM 누적 점유 → `psutil.virtual_memory().available` 감소 → vLLM UMA 분기의 free memory check 거부. `buff/cache` 가 reclaimable 임에도 psutil `available` 계산에서 부분 제외되는 것으로 추정.
+- 운영 규칙: **reboot 후 5분 이내에 vLLM 컨테이너 시작 필수**. 그 이상 지나면 어느 commit 이든 동일 거부 가능.
+- 부수 finding (G6): docker compose v2 `restart: "on-failure:N"` 의 max-retries 부분이 **swarm-only 로 처리되어 일반 deploy 에서 무시됨**. 결과적으로 무한 재시작 = `unless-stopped` 와 동일 → sshd-storm 재발. `restart: "no"` 로 강화 (commit `4b848a1`). 재시작이 필요하면 `docker compose up -d` 수동 호출.
+- 진짜 해결 후보:
+  1. **`vllm/utils/mem_utils.py` UMA 분기 패치**: `psutil.virtual_memory().available` 대신 `available + (buff/cache reclaimable 부분)` 사용. reclaimable kernel memory 를 free 로 인식하도록.
+  2. `--gpu-memory-utilization` 을 측정된 available 기반 동적 산정 (단순 0.85 곱 아닌 `available - safety_margin`).
+  3. 운영 정책으로 reboot 직후 즉시 시작 (workaround, 현재 채택).
+- §11.1-11.5 의 dad6ff8 거부 사례는 위 동일 원인. dad6ff8 코드 자체는 문제 없음 — 재시도 시 reboot 직후 즉시 시작하면 통과 가능성 큼.
 
 ## 12. 참고 링크
 
