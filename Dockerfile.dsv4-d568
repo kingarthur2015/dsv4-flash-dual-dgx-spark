@@ -165,6 +165,14 @@ RUN --mount=type=cache,id=uv-dsv4-d568,target=/root/.cache/uv \
 COPY patches/patch_split_module_compat.py /tmp/patch_split_module_compat.py
 RUN python3 /tmp/patch_split_module_compat.py
 
+# GB10 UMA: add VLLM_SKIP_INIT_MEMORY_CHECK=1 env-var escape hatch for
+# request_memory() pre-allocation check. See docs/dsv4-flash-tp2.md §11.6 —
+# nvidia driver accumulates host-RAM reservations after a few minutes uptime,
+# causing the check to reject well-sized configs that would actually fit.
+# Patch is idempotent; with the env-var unset, behavior is unchanged.
+COPY patches/patch_skip_init_memory_check.py /tmp/patch_skip_init_memory_check.py
+RUN python3 /tmp/patch_skip_init_memory_check.py
+
 # Restore the GB10-tuned fused-MoE configs that were placed by the base image's
 # vLLM install (the path now points at the freshly installed jasl wheel).
 COPY patches/moe_config_e256.json \
