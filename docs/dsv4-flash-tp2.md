@@ -445,6 +445,13 @@ desired GPU memory utilization (0.85, 103.38 GiB).
 ### 11.5. 결정
 `edc82b614f51` 유지. 이미지 `vllm-spark:dsv4-d568-dad6ff8` 는 spark01/02 로컬에 남겨두되 `.env` 미참조. dad6ff8 단독 디버깅(또는 `request_memory()` 우회 패치)은 별도 세션.
 
+### 11.6. 후속 검증 (2026-05-23 G6)
+원인 가설 점검 결과:
+- `request_memory()` (`vllm/v1/worker/utils.py:413`), `MemorySnapshot.measure()` (`vllm/utils/mem_utils.py`), `is_integrated_gpu()` (`vllm/platforms/cuda.py`), `gpu_worker.init_device()` 부근 — **edc82b614f51 ↔ dad6ff885838 라인-identical**. 즉 거부 차이는 코드 변경 아님.
+- 깨끗한 reboot 후 (호스트 psutil available 117 GiB) 깨끗한 dad6ff8 재시도 → **동일 거부 deterministic 재현**. host RAM 풍요와 무관 = 컨테이너 시작 직후 CUDA/nvidia driver pre-reserve 가 즉시 발생 (dependency 차이 또는 NCCL buffer 크기 추정, 미특정).
+- 따라서 단순 env-var skip 패치는 가중치 로드 단계에서 OOM 으로 surface 될 가능성 → 의미 없음. dad6ff8 자체 채택은 **dependency diff / NCCL init 메모리 측정 / jasl c79225692 (+153 commits) 재검증** 중 하나가 선행돼야 함.
+- 부수 발견: docker compose v2 `restart: "on-failure:N"` 의 max-retries 부분이 **swarm-only 로 처리되어 일반 deploy 에서 무시됨**. 결과적으로 무한 재시작 = `unless-stopped` 와 동일 → sshd-storm 재발. `restart: "no"` 로 강화 (commit `4b848a1`). 재시작이 필요하면 `docker compose up -d` 수동 호출.
+
 ## 12. 참고 링크
 
 - NVIDIA 개발자 포럼 [post #43](https://forums.developer.nvidia.com/t/deepseek-v4-flash-official-fp8-running-across-2x-dgx-spark-tp-2-mtp-200k-ctx-recipe-numbers/370309/43)
