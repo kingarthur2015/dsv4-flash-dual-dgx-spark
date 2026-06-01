@@ -17,7 +17,7 @@
 #
 # Stack:
 #   FROM ghcr.io/bjk110/vllm-spark:v022-d568
-#     (NGC 26.04 / PyTorch 2.12.0a0 / FlashInfer 0.6.11.post3 / Triton 3.7.0
+#     (NGC 26.04 / PyTorch 2.12.0a0 / FlashInfer 0.6.12 / Triton 3.7.0
 #      / NCCL 2.30.4 / Transformers 5.8.1)
 #   + jasl/vllm @ edc82b614f51 (replaces v022-d568's vLLM 0.21.0+PR#35568)
 #   + patches/apply_dsv4_packed_mapping.py (defensive — skips if branch
@@ -136,10 +136,10 @@ RUN --mount=type=cache,id=ccache-dsv4-d568,target=/root/.ccache \
 # STAGE 2: Runner (inherit v022-d568 — FlashInfer / Triton / NCCL / Transformers
 # all preinstalled). Only swap vLLM and add DSV4-specific bits.
 # =========================================================================
-FROM ghcr.io/bjk110/vllm-spark:v022-d568 AS runner
+FROM ghcr.io/bjk110/vllm-spark:v022-d568-fi0612 AS runner
 
 LABEL org.opencontainers.image.source="https://github.com/bjk110/spark_vllm_docker"
-LABEL org.opencontainers.image.description="vLLM jasl@edc82b614f51 +A-group cherry-picks (e1334312/5dcd086f/65da3607/e9c364bf scheduler decode-protection) (DeepSeek-V4-Flash) on v022-d568 (NGC 26.04 / FlashInfer 0.6.11.post3 / Triton 3.7.0 / NCCL 2.30.4 / Transformers 5.8.1) for DGX Spark GB10"
+LABEL org.opencontainers.image.description="vLLM jasl@edc82b614f51 +A-group cherry-picks (e1334312/5dcd086f/65da3607/e9c364bf scheduler decode-protection) (DeepSeek-V4-Flash) on v022-d568 (NGC 26.04 / FlashInfer 0.6.12 / Triton 3.7.0 / NCCL 2.30.4 / Transformers 5.8.1) for DGX Spark GB10"
 LABEL org.opencontainers.image.licenses="Apache-2.0"
 
 ARG TORCH_CUDA_ARCH=12.1a
