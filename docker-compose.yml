@@ -67,8 +67,26 @@ services:
       - NCCL_DEBUG=${NCCL_DEBUG:-WARN}
       - NCCL_NVLS_ENABLE=${NCCL_NVLS_ENABLE:-1}
       - VLLM_USE_BREAKABLE_CUDAGRAPH=${VLLM_USE_BREAKABLE_CUDAGRAPH:-}
+      - VLLM_MEMORY_PROFILER_ESTIMATE_CUDAGRAPHS=${VLLM_MEMORY_PROFILER_ESTIMATE_CUDAGRAPHS:-}
+      # ---- unholy-fusion / B12X kernels (empty = unset, no effect on jasl image) ----
+      - VLLM_USE_B12X_MOE=${VLLM_USE_B12X_MOE:-}
+      - VLLM_USE_B12X_MHC=${VLLM_USE_B12X_MHC:-}
+      - VLLM_USE_B12X_FP8_GEMM=${VLLM_USE_B12X_FP8_GEMM:-}
+      - VLLM_USE_B12X_SPARSE_INDEXER=${VLLM_USE_B12X_SPARSE_INDEXER:-}
+      - VLLM_USE_B12X_WO_PROJECTION=${VLLM_USE_B12X_WO_PROJECTION:-}
       - RAY_DEDUP_LOGS=0
       - RAY_memory_monitor_refresh_ms=0
+      # ---- unholy-fusion: NCCL / RoCE tuning ----
+      - NCCL_NET=${NCCL_NET:-}
+      - NCCL_CUMEM_ENABLE=${NCCL_CUMEM_ENABLE:-}
+      - NCCL_CROSS_NIC=${NCCL_CROSS_NIC:-}
+      - NCCL_IGNORE_CPU_AFFINITY=${NCCL_IGNORE_CPU_AFFINITY:-}
+      # ---- unholy-fusion: NCCL SO + JIT cache root + sparse indexer ----
+      - VLLM_NCCL_SO_PATH=${VLLM_NCCL_SO_PATH:-}
+      - VLLM_CACHE_ROOT=${VLLM_CACHE_ROOT:-}
+      - FLASHINFER_CUDA_ARCH_LIST=${FLASHINFER_CUDA_ARCH_LIST:-}
+      - VLLM_SPARSE_INDEXER_MAX_LOGITS_MB=${VLLM_SPARSE_INDEXER_MAX_LOGITS_MB:-256}
+      - MTP_NUM_TOKENS=${MTP_NUM_TOKENS:-1}
     deploy:
       resources:
         reservations:
@@ -76,9 +94,12 @@ services:
             - driver: nvidia
               count: all
               capabilities: [gpu]
+    shm_size: "64gb"
     volumes:
       - ${MODEL_PATH}:${MODEL_CONTAINER_PATH}:ro
       - ./.cache/vllm:/root/.cache/vllm
+      - ./cache/unholy-jit:/cache/jit
+      - ./cache/unholy-hf:/cache/huggingface
       - /sys/class/infiniband:/sys/class/infiniband:ro
       - ./entrypoint.sh:/entrypoint.sh:ro
       - ./patches:/patches:ro
@@ -140,7 +161,14 @@ services:
       - NCCL_DEBUG=${NCCL_DEBUG:-WARN}
       - NCCL_NVLS_ENABLE=${NCCL_NVLS_ENABLE:-1}
       - VLLM_USE_BREAKABLE_CUDAGRAPH=${VLLM_USE_BREAKABLE_CUDAGRAPH:-}
+      - VLLM_MEMORY_PROFILER_ESTIMATE_CUDAGRAPHS=${VLLM_MEMORY_PROFILER_ESTIMATE_CUDAGRAPHS:-}
       - RAY_memory_monitor_refresh_ms=0
+      # ---- unholy-fusion / B12X kernels (empty = unset, no effect on jasl image) ----
+      - VLLM_USE_B12X_MOE=${VLLM_USE_B12X_MOE:-}
+      - VLLM_USE_B12X_MHC=${VLLM_USE_B12X_MHC:-}
+      - VLLM_USE_B12X_FP8_GEMM=${VLLM_USE_B12X_FP8_GEMM:-}
+      - VLLM_USE_B12X_SPARSE_INDEXER=${VLLM_USE_B12X_SPARSE_INDEXER:-}
+      - VLLM_USE_B12X_WO_PROJECTION=${VLLM_USE_B12X_WO_PROJECTION:-}
       # ---- Model-specific env vars (0 = disabled) ----
       - VLLM_MARLIN_USE_ATOMIC_ADD=${VLLM_MARLIN_USE_ATOMIC_ADD:-0}
       - VLLM_USE_FLASHINFER_MOE_FP4=${VLLM_USE_FLASHINFER_MOE_FP4:-0}
@@ -158,6 +186,17 @@ services:
       # GB10 UMA: bypass request_memory() startup pre-check (patch_skip_init_memory_check.py).
       # 1 = skip (any real OOM still surfaces at weight load). See docs/dsv4-flash-tp2.md §11.6.
       - VLLM_SKIP_INIT_MEMORY_CHECK=${VLLM_SKIP_INIT_MEMORY_CHECK:-0}
+      # ---- unholy-fusion: NCCL / RoCE tuning ----
+      - NCCL_NET=${NCCL_NET:-}
+      - NCCL_CUMEM_ENABLE=${NCCL_CUMEM_ENABLE:-}
+      - NCCL_CROSS_NIC=${NCCL_CROSS_NIC:-}
+      - NCCL_IGNORE_CPU_AFFINITY=${NCCL_IGNORE_CPU_AFFINITY:-}
+      # ---- unholy-fusion: NCCL SO + JIT cache root + sparse indexer ----
+      - VLLM_NCCL_SO_PATH=${VLLM_NCCL_SO_PATH:-}
+      - VLLM_CACHE_ROOT=${VLLM_CACHE_ROOT:-}
+      - FLASHINFER_CUDA_ARCH_LIST=${FLASHINFER_CUDA_ARCH_LIST:-}
+      - VLLM_SPARSE_INDEXER_MAX_LOGITS_MB=${VLLM_SPARSE_INDEXER_MAX_LOGITS_MB:-256}
+      - MTP_NUM_TOKENS=${MTP_NUM_TOKENS:-1}
     deploy:
       resources:
         reservations:
@@ -165,9 +204,12 @@ services:
             - driver: nvidia
               count: all
               capabilities: [gpu]
+    shm_size: "64gb"
     volumes:
       - ${MODEL_PATH}:${MODEL_CONTAINER_PATH}:ro
       - ./.cache/vllm:/root/.cache/vllm
+      - ./cache/unholy-jit:/cache/jit
+      - ./cache/unholy-hf:/cache/huggingface
       - /sys/class/infiniband:/sys/class/infiniband:ro
       - ./entrypoint.sh:/entrypoint.sh:ro
       - ./patches:/patches:ro
