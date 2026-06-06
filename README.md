@@ -24,7 +24,14 @@ For release-by-release detail and patch-by-patch status, see
 
 ### v022-d568 (NGC 26.04, vLLM v0.21.0+#35568, FlashInfer 0.6.11.post3, Transformers 5.8.1, Triton 3.7.0, NCCL 2.30.4) — final forward-stack
 
-Stacked-upgrade image built 2026-05-18, the deepest in the v022 series. Each layer was booted and verified against the PrismaSCOUT NVFP4 TP=2 preset (text + image inference, MTP n=3); the final `-d568` layer was additionally verified against `wangzhang-122b-abliterix-fp8-tp2` to confirm the SM121 FP8 kernel path now activates, on 2026-05-19 against `wangzhang-122b-abliterix-nvfp4-tp2` (custom BF16 → NVFP4 W4A4 with fused-group shared `weight_global_scale`) to confirm the SM121 NVFP4 path (FlashInfer-CUTLASS NVFP4 GEMM + MoE) is live end-to-end, and on 2026-05-20 against `gemma4-31b-it` (dense BF16 multimodal, TP=1) and `qwen3.6-35b-a3b` (hybrid Mamba/Attention MoE BF16 with `--reasoning-parser qwen3` + `--compilation-config use_inductor_graph_partition=true`, TP=1) to confirm dense/hybrid single-node paths. The production default remains `v021-tq`; use `v022-d568` to validate behavior on the released v0.21.0 plus the cherry-pick.
+Stacked-upgrade image built 2026-05-18, the deepest in the v022 series. Each layer was booted and verified against the PrismaSCOUT NVFP4 TP=2 preset (text + image inference, MTP n=3); the final `-d568` layer was additionally verified against `wangzhang-122b-abliterix-fp8-tp2` to confirm the SM121 FP8 kernel path now activates, on 2026-05-19 against `wangzhang-122b-abliterix-nvfp4-tp2` (custom BF16 → NVFP4 W4A4 with fused-group shared `weight_global_scale`) to confirm the SM121 NVFP4 path (FlashInfer-CUTLASS NVFP4 GEMM + MoE) is live end-to-end, and on 2026-05-20 against `gemma4-31b-it` (dense BF16 multimodal, TP=1) and `qwen3.6-35b-a3b` (hybrid Mamba/Attention MoE BF16 with `--reasoning-parser qwen3` + `--compilation-config use_inductor_graph_partition=true`, TP=1) to confirm dense/hybrid single-node paths. Use `v022-d568` to validate behavior on the released v0.21.0 plus the cherry-pick.
+
+Current image roles:
+- `v021-ngc2603`: stable base for most existing presets (non-TQ)
+- `v021-tq`: TurboQuant preset base (required for `*-tq.env` presets)
+- `v022-d568`: forward-stack validation base (NGC 26.04 + vLLM 0.21.0)
+- `dsv4-d568`: primary DeepSeek-V4-Flash path
+- `unholy-fusion`: experimental high-prefill DeepSeek-V4-Flash path
 
 | Component | Version |
 |---|---|
@@ -699,8 +706,8 @@ docker compose --profile worker down || true
 
 # 2. On each node — back up current config and swap in unholy-fusion files
 cd /path/to/vllm-spark
-cp .env ".env.backup.$(date +%Y%m%d-%H%M%S)" 2>/dev/null || true
-cp entrypoint.sh "entrypoint.sh.backup.$(date +%Y%m%d-%H%M%S)" 2>/dev/null || true
+cp .env .env.dsv4.bak
+cp entrypoint.sh entrypoint.dsv4.bak
 cp .env.unholy-fusion .env
 cp entrypoint.unholy.sh entrypoint.sh
 
