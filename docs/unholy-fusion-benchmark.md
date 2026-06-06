@@ -10,7 +10,7 @@
 ## Background
 
 The unholy-fusion fork adds custom GB10 (Blackwell sm_120/sm_121) kernels
-unavailable in the jasl lineage:
+unavailable in the dsv4-d568 image:
 
 | Env var | Kernel | Status in test |
 |---------|--------|----------------|
@@ -256,7 +256,11 @@ n=2 must not be used with B12X_MOE.
 
 ---
 
-## jasl0603 Forum-Spec Results (2026-06-05, for comparison)
+## dsv4-d568 Forum-Spec Results (2026-06-05, for comparison)
+
+> **Note on label**: These results were recorded as "jasl0603" — the specific dsv4-d568
+> build tested at the time. "jasl0603" refers to a particular cherry-sched image variant;
+> column headers below retain the original label for traceability.
 
 `pp=2048, tg=128, runs=3, latency-mode=generation`  
 Config: MAX_NUM_SEQS=6, MAX_MODEL_LEN=1,000,000, GPU_UTIL=0.82, MTP n=2, Ray + expert-parallel  
@@ -316,7 +320,7 @@ can deliver high burst decode even with MTP n=2. At d≥32k, peak collapses as K
 
 ---
 
-## Comparison vs. jasl0603
+## Comparison vs. dsv4-d568
 
 ### Config differences
 
@@ -402,8 +406,8 @@ Peak throughput (best single run) tells a different story from total:
 | Decode peak d≤16k | tie | <10% | both near hardware ceiling |
 | Decode peak d≥32k | **unholy-fusion** | +40–200% | jasl KV exhausted (11.9 GiB) |
 | Decode peak d=131072 | **unholy-fusion** | **3×** | 95 vs 32 t/s; B12X attention kernel |
-| Long-context | **jasl0603** | 4× more | 1M vs 262k tokens |
-| Operational stability | **jasl0603** | — | unholy hangs at NUM_SEQS>4 |
+| Long-context | **dsv4-d568** | 4× more | 1M vs 262k tokens |
+| Operational stability | **dsv4-d568** | — | unholy hangs at NUM_SEQS>4 |
 
 **Key takeaway**: unholy-fusion's B12X_MOE kernel delivers a massive prefill advantage
 (~2×) and eliminates MTP n=2 throughput collapse at depth. The decode peak hardware
@@ -411,8 +415,8 @@ ceiling is similar (~115–120 t/s at c=8, d=0). The practical gap is: unholy-fu
 cannot run with MAX_NUM_SEQS>4 or MAX_MODEL_LEN>262k, making it unsuitable as a
 drop-in for long-context or high-concurrency production workloads.
 
-jasl0603 uses the Ray backend with expert parallelism. unholy-fusion uses mp
-backend without expert parallelism (`--enable-expert-parallel` is incompatible
+dsv4-d568 uses the Ray backend (default) with expert parallelism. unholy-fusion uses
+the mp backend without expert parallelism (`--enable-expert-parallel` is incompatible
 with `VLLM_USE_B12X_MOE`).
 
 **Production-readiness**: unholy-fusion is valuable as an **experimental
@@ -422,7 +426,7 @@ few long-context streams (`c=1–2`), not many concurrent long-context users.
 Long-context concurrency (`d≥4k`, `c≥4`) collapses decode throughput due to
 O(n) attention cost and scheduler queuing under `MAX_NUM_SEQS=4`. For
 workloads requiring more than 262k context or sustained high concurrency,
-jasl0603 remains the appropriate choice.
+dsv4-d568 remains the appropriate choice.
 
 ### Operational limits of unholy-fusion
 

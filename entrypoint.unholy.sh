@@ -27,6 +27,9 @@ export VLLM_CACHE_ROOT="/cache/huggingface/vllm-cache"
 mkdir -p "${DG_JIT_CACHE_DIR}" "${TRITON_CACHE_DIR}" "${TORCHINDUCTOR_CACHE_DIR}" "${VLLM_CACHE_ROOT}"
 
 : "${ROLE:?ROLE must be set to head or worker}"
+# NOTE: This entrypoint always passes --distributed-executor-backend mp to vllm serve.
+# DISTRIBUTED_BACKEND is set here only to establish the default; it is NOT used to
+# switch between Ray and mp — Ray is not available in the aidendle94 conda image.
 : "${DISTRIBUTED_BACKEND:=mp}"
 : "${MTP_NUM_TOKENS:=1}"
 
