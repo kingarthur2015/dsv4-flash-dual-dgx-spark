@@ -686,35 +686,47 @@ Ray is not used. Switching from `dsv4-d568` is a file-swap.
 
 ### Switching from dsv4-d568 → unholy-fusion (experimental)
 
-> **GB10 note**: stopping a vLLM container leaves ~100 GiB stuck in the NVIDIA driver.
-> Reboot both nodes before switching to recover UMA memory — `rmmod nvidia_uvm` does not free it.
+> **GB10 UMA note**: stopping a vLLM container leaves ~100 GiB stuck in the NVIDIA driver.
+> `rmmod nvidia_uvm` does **not** free it — a full reboot is required. Stop containers
+> and copy files first, then reboot.
 
 ```bash
-# 1. Reboot both nodes to recover GB10 UMA memory
-ssh spark01 'sudo systemctl reboot'
-ssh spark02 'sudo systemctl reboot'
+# 1. Stop existing containers on both nodes
+# On spark01:
+docker compose --profile head down || true
+# On spark02:
+docker compose --profile worker down || true
 
-# 2. On each node — swap entrypoint and config
+# 2. On each node — back up current config and swap in unholy-fusion files
 cd /path/to/vllm-spark
-cp .env .env.dsv4.bak            # keep current config as backup
-cp entrypoint.sh entrypoint.dsv4.bak
+cp .env ".env.backup.$(date +%Y%m%d-%H%M%S)" 2>/dev/null || true
+cp entrypoint.sh "entrypoint.sh.backup.$(date +%Y%m%d-%H%M%S)" 2>/dev/null || true
 cp .env.unholy-fusion .env
 cp entrypoint.unholy.sh entrypoint.sh
 
-# 3. Start worker first, then head
-# On spark02:
-docker compose -f docker-compose.yml --env-file .env --profile worker up -d
-# On spark01:
-docker compose -f docker-compose.yml --env-file .env --profile head up -d
+# 3. Reboot both nodes to recover GB10 UMA memory
+sudo reboot
+```
 
-# 4. Verify
+After both nodes are back up:
+
+```bash
+# 4. On spark02 — start worker first
+docker compose --profile worker up -d
+
+# 5. On spark01 — start head
+docker compose --profile head up -d
+
+# 6. Verify on spark01
 curl http://localhost:8000/health
 docker logs vllm-spark-head 2>&1 | grep "Application startup complete"
 docker logs vllm-spark-worker 2>&1 | grep -E "startup|ready|error" | tail -5
+# Or follow live:
+# docker logs -f vllm-spark-head
 ```
 
-> **Note**: startup takes ~5 min with warm JIT cache (~60 s weight load + ~17 s profiling).
-> With a cold cache the first boot is significantly longer (JIT recompilation).
+> **Startup time**: ~5 min with warm JIT cache (~60 s weight load + ~17 s profiling).
+> Cold cache (first boot after image change) is significantly longer due to JIT recompilation.
 
 ### Switching back to dsv4-d568
 

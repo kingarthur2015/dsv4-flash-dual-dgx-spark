@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # Entrypoint for aidendle94/sparkrun-vllm-ds4-gb10 (unholy-fusion) image.
-# Supports both Ray (default) and mp backends, matching jasl0603 entrypoint logic.
+# This repository integration is mp-only. Ray is not available in this image path.
+# The vLLM invocation intentionally forces --distributed-executor-backend mp.
 set -euo pipefail
 
 # ── conda env setup ──────────────────────────────────────────────────────────
@@ -27,11 +28,24 @@ export VLLM_CACHE_ROOT="/cache/huggingface/vllm-cache"
 mkdir -p "${DG_JIT_CACHE_DIR}" "${TRITON_CACHE_DIR}" "${TORCHINDUCTOR_CACHE_DIR}" "${VLLM_CACHE_ROOT}"
 
 : "${ROLE:?ROLE must be set to head or worker}"
-# NOTE: This entrypoint always passes --distributed-executor-backend mp to vllm serve.
-# DISTRIBUTED_BACKEND is set here only to establish the default; it is NOT used to
-# switch between Ray and mp — Ray is not available in the aidendle94 conda image.
+
+# ── safe defaults ─────────────────────────────────────────────────────────────
+# These match .env.unholy-fusion; override by setting the variable before launch.
+# MAX_NUM_SEQS ≥ 5 causes CUDA graph capture hang on GB10 — do not raise above 4.
+# MAX_MODEL_LEN=524288 starts OK but crashes at d≥131072 — keep at 262144.
+# MTP_NUM_TOKENS=2 causes catastrophic throughput collapse at c≥4.
 : "${DISTRIBUTED_BACKEND:=mp}"
+: "${MAX_MODEL_LEN:=262144}"
+: "${MAX_NUM_SEQS:=4}"
+: "${MAX_NUM_BATCHED_TOKENS:=8192}"
+: "${GPU_MEMORY_UTILIZATION:=0.80}"
 : "${MTP_NUM_TOKENS:=1}"
+
+# Enforce mp-only — Ray is not available in the aidendle94 conda environment.
+if [ "${DISTRIBUTED_BACKEND}" != "mp" ]; then
+  echo "[unholy] ERROR: unholy-fusion integration is mp-only; set DISTRIBUTED_BACKEND=mp" >&2
+  exit 1
+fi
 
 # ── NCCL GID index: auto-detect RoCE v2 IPv4-mapped entry ───────────────────
 for HCA in rocep1s0f0 roceP2p1s0f0; do
@@ -82,8 +96,11 @@ PYPATCH1
 fi
 
 # ── GB10 UMA patch 2: determine_available_memory() post-profile assertion ────
-# GB10 page cache release during profiling → current_free > init_free → OOM.
-# Use current_free (post-release) as safe KV budget (~34 GiB).
+# On GB10 UMA, the OS releases page cache during profiling, causing
+# current_free > init_free. This triggers an assertion in vLLM v1.
+# The patch returns current_free as the post-profile UMA free-memory basis.
+# This is not the same as the final vLLM-reported KV cache allocation
+# (~17 GiB in the stable benchmark at GPU_MEMORY_UTILIZATION=0.80).
 GPU_WORKER=/opt/env/lib/python3.12/site-packages/vllm/v1/worker/gpu_worker.py
 if [ -f "$GPU_WORKER" ] && ! grep -q "_uma_early_ret" "$GPU_WORKER"; then
   /opt/env/bin/python3 - "$GPU_WORKER" <<'PYPATCH2'
@@ -118,10 +135,10 @@ if [ "${ROLE}" = "worker" ]; then
     --tensor-parallel-size "${TP_SIZE:-2}" \
     --kv-cache-dtype fp8 \
     --block-size 256 \
-    --max-model-len "${MAX_MODEL_LEN:-262144}" \
-    --max-num-seqs "${MAX_NUM_SEQS:-4}" \
-    --max-num-batched-tokens "${MAX_NUM_BATCHED_TOKENS:-16384}" \
-    --gpu-memory-utilization "${GPU_MEMORY_UTILIZATION:-0.80}" \
+    --max-model-len "${MAX_MODEL_LEN}" \
+    --max-num-seqs "${MAX_NUM_SEQS}" \
+    --max-num-batched-tokens "${MAX_NUM_BATCHED_TOKENS}" \
+    --gpu-memory-utilization "${GPU_MEMORY_UTILIZATION}" \
     --enable-prefix-caching \
     --tokenizer-mode deepseek_v4 \
     --distributed-executor-backend mp \
@@ -149,10 +166,10 @@ exec vllm serve "${MODEL_CONTAINER_PATH}" \
   --tensor-parallel-size "${TP_SIZE:-2}" \
   --kv-cache-dtype fp8 \
   --block-size 256 \
-  --max-model-len "${MAX_MODEL_LEN:-262144}" \
-  --max-num-seqs "${MAX_NUM_SEQS:-4}" \
-  --max-num-batched-tokens "${MAX_NUM_BATCHED_TOKENS:-16384}" \
-  --gpu-memory-utilization "${GPU_MEMORY_UTILIZATION:-0.80}" \
+  --max-model-len "${MAX_MODEL_LEN}" \
+  --max-num-seqs "${MAX_NUM_SEQS}" \
+  --max-num-batched-tokens "${MAX_NUM_BATCHED_TOKENS}" \
+  --gpu-memory-utilization "${GPU_MEMORY_UTILIZATION}" \
   --enable-prefix-caching \
   --tokenizer-mode deepseek_v4 \
   --distributed-executor-backend mp \
