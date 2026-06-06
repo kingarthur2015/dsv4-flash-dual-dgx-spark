@@ -67,6 +67,7 @@ services:
       - NCCL_DEBUG=${NCCL_DEBUG:-WARN}
       - NCCL_NVLS_ENABLE=${NCCL_NVLS_ENABLE:-1}
       - VLLM_USE_BREAKABLE_CUDAGRAPH=${VLLM_USE_BREAKABLE_CUDAGRAPH:-}
+      - VLLM_MEMORY_PROFILER_ESTIMATE_CUDAGRAPHS=${VLLM_MEMORY_PROFILER_ESTIMATE_CUDAGRAPHS:-}
       # ---- unholy-fusion / B12X kernels (empty = unset, no effect on jasl image) ----
       - VLLM_USE_B12X_MOE=${VLLM_USE_B12X_MOE:-}
       - VLLM_USE_B12X_MHC=${VLLM_USE_B12X_MHC:-}
@@ -93,14 +94,14 @@ services:
             - driver: nvidia
               count: all
               capabilities: [gpu]
-    shm_size: "10gb"
+    shm_size: "64gb"
     volumes:
       - ${MODEL_PATH}:${MODEL_CONTAINER_PATH}:ro
       - ./.cache/vllm:/root/.cache/vllm
       - ./cache/unholy-jit:/cache/jit
       - ./cache/unholy-hf:/cache/huggingface
       - /sys/class/infiniband:/sys/class/infiniband:ro
-      - ./entrypoint.unholy.sh:/entrypoint.sh:ro
+      - ./entrypoint.sh:/entrypoint.sh:ro
       - ./patches:/patches:ro
     devices:
       - /dev/infiniband:/dev/infiniband
@@ -160,6 +161,7 @@ services:
       - NCCL_DEBUG=${NCCL_DEBUG:-WARN}
       - NCCL_NVLS_ENABLE=${NCCL_NVLS_ENABLE:-1}
       - VLLM_USE_BREAKABLE_CUDAGRAPH=${VLLM_USE_BREAKABLE_CUDAGRAPH:-}
+      - VLLM_MEMORY_PROFILER_ESTIMATE_CUDAGRAPHS=${VLLM_MEMORY_PROFILER_ESTIMATE_CUDAGRAPHS:-}
       - RAY_memory_monitor_refresh_ms=0
       # ---- unholy-fusion / B12X kernels (empty = unset, no effect on jasl image) ----
       - VLLM_USE_B12X_MOE=${VLLM_USE_B12X_MOE:-}
@@ -202,14 +204,14 @@ services:
             - driver: nvidia
               count: all
               capabilities: [gpu]
-    shm_size: "10gb"
+    shm_size: "64gb"
     volumes:
       - ${MODEL_PATH}:${MODEL_CONTAINER_PATH}:ro
       - ./.cache/vllm:/root/.cache/vllm
       - ./cache/unholy-jit:/cache/jit
       - ./cache/unholy-hf:/cache/huggingface
       - /sys/class/infiniband:/sys/class/infiniband:ro
-      - ./entrypoint.unholy.sh:/entrypoint.sh:ro
+      - ./entrypoint.sh:/entrypoint.sh:ro
       - ./patches:/patches:ro
     devices:
       - /dev/infiniband:/dev/infiniband

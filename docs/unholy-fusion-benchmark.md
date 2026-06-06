@@ -75,6 +75,53 @@ With warm cache, model startup takes ~5 min (weight load ~60 s, profiling ~17 s)
 
 ---
 
+## Full Depth Sweep — MTP n=1, MAX_NUM_SEQS=4 (2026-06-06 11:30 KST)
+
+`pp=2048, tg=128, runs=3, latency-mode=generation`  
+Config: MAX_NUM_SEQS=4, MAX_MODEL_LEN=262144, GPU_UTIL=0.80, MTP n=1
+
+### Prompt Processing — pp2048 t/s (total)
+
+| depth | c=1 | c=2 | c=4 | c=8 |
+|------:|----:|----:|----:|----:|
+| 0 | 1580 | 1960 | 1957 | 1119 |
+| 4096 | 2029 | 1977 | 2008 | 1581 |
+| 8192 | 1280 | 1599 | 2002 | 1718 |
+| 16384 | 2017 | 1979 | 2004 | 1845 |
+| 32768 | 1971 | 1983 | 1988 | 1908 |
+| 65536 | 1921 | 1925 | 1931 | 1899 |
+
+Prefill is consistently ~1900–2030 t/s at depth ≥ 4k. The d=0/c=1 dip (1580) reflects
+initial JIT recompilation on the first request.
+
+### Token Generation — tg128 t/s (total)
+
+| depth | c=1 | c=2 | c=4 | c=8 |
+|------:|----:|----:|----:|----:|
+| 0 | 38.3 | 60.7 | 87.1 | **62.0** |
+| 4096 | 39.9 | 41.0 | 38.0 | 35.0 |
+| 8192 | 36.9 | 33.2 | 26.4 | 23.9 |
+| 16384 | 32.1 | 22.5 | 17.7 | 14.4 |
+| 32768 | 35.0 | 13.4 | 9.2 | 8.0 |
+| 65536 | 34.1 | 7.6 | 5.3 | 4.0 |
+
+### Token Generation — tg128 peak t/s
+
+| depth | c=1 | c=2 | c=4 | c=8 |
+|------:|----:|----:|----:|----:|
+| 0 | 41.0 | 72.0 | 115.0 | **118.3** |
+| 4096 | 43.0 | 67.7 | 100.7 | 101.7 |
+| 8192 | 42.3 | 64.7 | 101.0 | 96.0 |
+| 16384 | 36.3 | 60.7 | 100.7 | 98.3 |
+| 32768 | 41.0 | 66.7 | 95.3 | 97.3 |
+| 65536 | 38.3 | 66.7 | 95.3 | 93.7 |
+
+**Note**: MAX_NUM_SEQS=4 caps actual concurrency — c=8 requests are queued in batches
+of 4, so c=8 total is lower than expected. Compare to 2026-06-05 run (MAX_NUM_SEQS=8):
+c8 total d=0 was 73.79 t/s vs 62.0 t/s here.
+
+---
+
 ## Full Depth Sweep — MTP n=1 (2026-06-05 08:46 KST)
 
 `pp=2048, tg=128, runs=3, latency-mode=generation`
@@ -163,14 +210,83 @@ n=2 must not be used with B12X_MOE.
 
 ## Comparison vs. jasl0603
 
-| metric | jasl0603 | unholy-fusion n=1 | delta |
-|--------|----------:|------------------:|------:|
-| tg total @ d=0, c=8 | 61.67 t/s | 73.79 t/s | **+19.6%** |
-| tg peak @ d=0, c=8 | — | 170.67 t/s | ≈ forum 167 t/s |
-| pp @ d=0, c=8 | ~1100 t/s | ~1950 t/s | — |
-| model load time | ~64 s | ~60 s | comparable |
-| KV cache budget | ~34 GiB | ~34 GiB | equal (same UMA limit) |
+### jasl0603 forum-spec (2026-06-05) vs unholy-fusion (2026-06-06)
+
+Config differences:
+| param | jasl0603 | unholy-fusion |
+|-------|----------|---------------|
+| MAX_NUM_SEQS | 6 | 4 |
+| MAX_MODEL_LEN | 1,000,000 | 262,144 |
+| GPU_UTIL | 0.82 | 0.80 |
+| MTP | n=2 | n=1 |
+| backend | Ray + expert-parallel | mp (no expert-parallel) |
+| KV cache | ~11.9 GiB | ~16.9 GiB |
+
+#### Prefill (pp2048 total, c=1)
+
+| depth | jasl0603 | unholy-fusion | delta |
+|------:|---------:|--------------:|------:|
+| d0 | 949 t/s | 1580 t/s | +66% |
+| d4096 | 887 t/s | 2029 t/s | +129% |
+| d8192 | 868 t/s | 1280 t/s | +47% |
+| d16384 | 839 t/s | 2017 t/s | +140% |
+| d32768 | 795 t/s | 1971 t/s | +148% |
+| d65536 | 731 t/s | 1921 t/s | +163% |
+
+unholy-fusion prefill is ~1.5–2.5× faster at all depths.
+
+#### Decode total (tg128 total t/s, c=8)
+
+| depth | jasl0603 (MTP n=2) | unholy-fusion (MTP n=1) | delta |
+|------:|-------------------:|------------------------:|------:|
+| d0 | 40.2 t/s | 62.0 t/s | **+54%** |
+| d4096 | 17.6 t/s | 35.0 t/s | **+99%** |
+| d8192 | 10.0 t/s | 23.9 t/s | **+139%** |
+| d16384 | 5.6 t/s | 14.4 t/s | **+157%** |
+| d32768 | 2.8 t/s | 8.0 t/s | **+186%** |
+| d65536 | 1.3 t/s | 4.0 t/s | **+208%** |
+
+**Caution**: jasl0603 uses MTP n=2 which collapses throughput at depth ≥ 4k (see
+`dsv4_forum53_env_findings.md`). The delta at high depth reflects MTP n=2 degradation
+more than B12X_MOE gains. At d=0 where MTP n=2 is less harmful, delta is +54%.
+
+#### Decode peak (tg128 peak t/s, c=8)
+
+| depth | jasl0603 | unholy-fusion | note |
+|------:|---------:|--------------:|------|
+| d0 | 116 t/s | 118 t/s | ≈ equal |
+| d4096 | 108 t/s | 102 t/s | jasl slightly ahead |
+| d8192 | 114 t/s | 96 t/s | jasl ahead |
+| d16384 | 107 t/s | 98 t/s | jasl slightly ahead |
+| d32768 | 66 t/s | 97 t/s | **unholy ahead** (KV exhaustion in jasl) |
+| d65536 | 38 t/s | 94 t/s | **unholy ahead** (+147%) |
+
+Peak t/s (best-of-3) is similar at d≤16k. At d≥32k, jasl hits KV exhaustion
+(1M context with only 11.9 GiB KV), while unholy-fusion (262k context, 16.9 GiB
+KV) maintains ~95 t/s peak even at depth 65k.
+
+#### Summary
+
+| metric | winner | note |
+|--------|--------|------|
+| Prefill | **unholy-fusion** | 1.5–2.5× faster |
+| Decode total d=0, c=8 | **unholy-fusion** +54% | partly due to jasl MTP n=2 |
+| Decode peak d=0, c=8 | tie | 118 vs 116 t/s |
+| Decode peak d≥32k | **unholy-fusion** | jasl KV exhausted at 1M ctx |
+| Long-context support | **jasl0603** | 1M vs 262k tokens |
+| Operational stability | **jasl0603** | unholy hangs at MAX_NUM_SEQS>4 |
 
 jasl0603 uses the Ray backend with expert parallelism. unholy-fusion uses mp
 backend without expert parallelism (`--enable-expert-parallel` is incompatible
 with `VLLM_USE_B12X_MOE`).
+
+### Operational limits of unholy-fusion
+
+- **MAX_NUM_SEQS ≤ 4**: Values of 6 or 8 cause CUDA graph capture hang at startup
+  (Worker_TP* stalls in `gpu_model_runner.py:6290`, EngineCore blocks on shm_broadcast
+  indefinitely). Root cause unknown; likely MTP + B12X_MOE interaction with larger
+  graph capture sizes.
+- **MAX_MODEL_LEN ≤ 262144**: 1M and 131072 caused similar startup hang (confirmed
+  separate from NUM_SEQS issue — hang occurs even at 131k when NUM_SEQS=6).
+- Requires `VLLM_MEMORY_PROFILER_ESTIMATE_CUDAGRAPHS=0` in .env (missing this
+  causes `ValueError: invalid literal for int() with base 10: ''` at engine init).
