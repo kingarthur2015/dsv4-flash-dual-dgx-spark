@@ -169,6 +169,11 @@ recipe / image / topology in its header comment.
 
 ## Quick Start
 
+> **Note**: The `models/` directory in this repository contains `.env` preset files only.
+> It does **not** store actual model weights. Keep model weights outside the repository
+> and point `MODEL_PATH` / `MODEL_CONTAINER_PATH` to the correct host/container paths.
+> See [`models/README.md`](models/README.md) for details.
+
 ### 0. Get the Docker Image
 
 #### Option A: Pull pre-built image from GHCR
@@ -419,7 +424,7 @@ vllm-spark/
 │   └── Dockerfile.v022(-fi0611/-ngc2604/-tx581/-trt37/-nccl234)  # v022 stack intermediates
 ├── CHANGELOG.md                   # Release-by-release history
 ├── PATCH_STATUS.md                # Per-patch purpose / status / removal condition
-├── models/                        # Validated model presets
+├── models/                        # .env preset files for model-serving configs (not model weights — see models/README.md)
 │   ├── gemma4-26b-a4b.env             # Gemma 4 26B MoE (single, TP1)
 │   ├── gemma4-26b-a4b-tq.env          # Gemma 4 + TurboQuant KV (single, TP1)
 │   ├── redhatai-122b-nvfp4.env        # RedHatAI NVFP4 (single, TP1)
