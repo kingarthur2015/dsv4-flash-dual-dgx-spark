@@ -450,7 +450,7 @@ vllm-spark/
 │   ├── dsv4-flash-tp2.md             # DSV4-Flash: build, recipe, 9-way benchmark sweep
 │   └── unholy-fusion-benchmark.md    # unholy-fusion B12X benchmark + comparison vs dsv4-d568
 ├── benchmarks/                    # llama-benchy benchmark results
-├── patches/                       # SM121 / PyTorch 2.11 / TurboQuant patches
+├── patches/                       # Build/runtime patch scripts and compatibility shims; see patches/README.md
 │   ├── fix_pytorch211_compat.py       # hoist=True removal (PyTorch 2.11)
 │   ├── fastsafetensors_natural_sort.patch
 │   ├── aot_cache_fix.patch
