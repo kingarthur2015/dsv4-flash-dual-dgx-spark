@@ -439,7 +439,7 @@ vllm-spark/
 │   ├── qwen3.6-35b-a3b.env           # Qwen3.6-35B-A3B BF16 hybrid MoE (single, TP1; v022-d568)
 │   ├── dsv4-flash-fp8-tp2.env        # DeepSeek-V4-Flash official FP8 (dual-rdma, TP2; dsv4-d568)
 │   └── qwen3.6-35b-fp16.env           # ⚗️ Qwen3.6 FP16 experimental (single, TP1)
-├── entrypoint.unholy.sh           # unholy-fusion image entrypoint (swap with entrypoint.sh to activate)
+├── entrypoint.unholy.sh           # unholy-fusion image entrypoint (used via compose/docker-compose.unholy.yml)
 ├── .env.unholy-fusion             # unholy-fusion config (MAX_NUM_SEQS=4, mp backend, B12X_MOE=1)
 ├── docs/                          # Per-model deep-dive guides
 │   ├── dsv4-flash-tp2.md             # DSV4-Flash: build, recipe, 9-way benchmark sweep
@@ -691,11 +691,14 @@ Ray is not used. Switching from `dsv4-d568` is a file-swap.
 | `MTP_NUM_TOKENS` | `1` | n=2 causes catastrophic throughput collapse at c≥4; n=3 is experimental |
 | `VLLM_USE_B12X_MOE` | `1` | required for 2× prefill speedup |
 
-### Switching from dsv4-d568 → unholy-fusion (experimental)
+### Switching from dsv4-d568 → unholy-fusion (primary path)
 
 > **GB10 UMA note**: stopping a vLLM container leaves ~100 GiB stuck in the NVIDIA driver.
-> `rmmod nvidia_uvm` does **not** free it — a full reboot is required. Stop containers
-> and copy files first, then reboot.
+> `rmmod nvidia_uvm` does **not** free it — a full reboot is required. Stop first, then reboot.
+
+The compose override uses `compose/docker-compose.unholy.yml` and `--env-file .env.unholy-fusion`.
+No files need to be copied or overwritten. The override sets `ENTRYPOINT_FILE=./entrypoint.unholy.sh`
+which the base compose resolves without touching `entrypoint.sh` or `.env`.
 
 ```bash
 # 1. Stop existing containers on both nodes
@@ -704,27 +707,28 @@ docker compose --profile head down || true
 # On spark02:
 docker compose --profile worker down || true
 
-# 2. On each node — back up current config and swap in unholy-fusion files
-cd /path/to/vllm-spark
-cp .env .env.dsv4.bak
-cp entrypoint.sh entrypoint.dsv4.bak
-cp .env.unholy-fusion .env
-cp entrypoint.unholy.sh entrypoint.sh
-
-# 3. Reboot both nodes to recover GB10 UMA memory
+# 2. Reboot both nodes to recover GB10 UMA memory
 sudo reboot
 ```
 
 After both nodes are back up:
 
 ```bash
-# 4. On spark02 — start worker first
-docker compose --profile worker up -d
+# 3. On spark02 — start worker first
+docker compose \
+  -f docker-compose.yml \
+  -f compose/docker-compose.unholy.yml \
+  --env-file .env.unholy-fusion \
+  --profile worker up -d
 
-# 5. On spark01 — start head
-docker compose --profile head up -d
+# 4. On spark01 — start head
+docker compose \
+  -f docker-compose.yml \
+  -f compose/docker-compose.unholy.yml \
+  --env-file .env.unholy-fusion \
+  --profile head up -d
 
-# 6. Verify on spark01
+# 5. Verify on spark01
 curl http://localhost:8000/health
 docker logs vllm-spark-head 2>&1 | grep "Application startup complete"
 docker logs vllm-spark-worker 2>&1 | grep -E "startup|ready|error" | tail -5
@@ -735,7 +739,46 @@ docker logs vllm-spark-worker 2>&1 | grep -E "startup|ready|error" | tail -5
 > **Startup time**: ~5 min with warm JIT cache (~60 s weight load + ~17 s profiling).
 > Cold cache (first boot after image change) is significantly longer due to JIT recompilation.
 
+#### Manual fallback only
+
+If your Docker Compose version does not support the `${ENTRYPOINT_FILE:-}` variable in volume specs,
+use the older copy-based method. Back up your files first.
+
+```bash
+# On each node — back up and swap
+cp .env .env.dsv4.bak
+cp entrypoint.sh entrypoint.dsv4.bak
+cp .env.unholy-fusion .env
+cp entrypoint.unholy.sh entrypoint.sh
+# Then: sudo reboot, then docker compose --profile worker|head up -d
+```
+
 ### Switching back to dsv4-d568
+
+#### Primary override path
+
+No files were modified, so simply stop the unholy containers and restart with the normal command:
+
+```bash
+# On spark01:
+docker compose \
+  -f docker-compose.yml \
+  -f compose/docker-compose.unholy.yml \
+  --profile head down || true
+
+# On spark02:
+docker compose \
+  -f docker-compose.yml \
+  -f compose/docker-compose.unholy.yml \
+  --profile worker down || true
+
+# Reboot to reclaim GB10 UMA memory, then start the normal dsv4-d568 path:
+# docker compose --env-file models/dsv4-flash-fp8-tp2.env --profile worker|head up -d
+```
+
+#### Manual fallback path
+
+If the manual fallback was used, restore the backed-up files before restarting:
 
 ```bash
 # On each node
