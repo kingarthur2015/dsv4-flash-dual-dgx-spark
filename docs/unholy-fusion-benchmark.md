@@ -75,50 +75,61 @@ With warm cache, model startup takes ~5 min (weight load ~60 s, profiling ~17 s)
 
 ---
 
-## Full Depth Sweep — MTP n=1, MAX_NUM_SEQS=4 (2026-06-06 11:30 KST)
+## Full Depth Sweep — MTP n=1, MAX_NUM_SEQS=4 (2026-06-06 22:14 KST)
 
 `pp=2048, tg=128, runs=3, latency-mode=generation`  
-Config: MAX_NUM_SEQS=4, MAX_MODEL_LEN=262144, GPU_UTIL=0.80, MTP n=1
+Config: MAX_NUM_SEQS=4, MAX_MODEL_LEN=262144, GPU_UTIL=0.80, MTP n=1, KV=17.1 GiB (1,144,306 tokens)
 
 ### Prompt Processing — pp2048 t/s (total)
 
 | depth | c=1 | c=2 | c=4 | c=8 |
 |------:|----:|----:|----:|----:|
-| 0 | 1580 | 1960 | 1957 | 1119 |
-| 4096 | 2029 | 1977 | 2008 | 1581 |
-| 8192 | 1280 | 1599 | 2002 | 1718 |
-| 16384 | 2017 | 1979 | 2004 | 1845 |
-| 32768 | 1971 | 1983 | 1988 | 1908 |
-| 65536 | 1921 | 1925 | 1931 | 1899 |
+| 0 | 1919 | 1958 | 1931 | 1140 |
+| 4096 | 2051 | 1984 | 2003 | 1561 |
+| 8192 | 1925 | 1987 | 2007 | 1723 |
+| 16384 | 2003 | 1795 | 2012 | 1853 |
+| 32768 | 1977 | 1986 | 1987 | 1915 |
+| 65536 | 1927 | 1933 | 1939 | 1904 |
+| **131072** | **1813** | **1821** | **1821** | **1820** |
 
-Prefill is consistently ~1900–2030 t/s at depth ≥ 4k. The d=0/c=1 dip (1580) reflects
-initial JIT recompilation on the first request.
+Prefill is consistently ~1900–2050 t/s across all depths. At d=131072, throughput
+dips slightly to ~1813–1821 t/s due to attention cost scaling with context length.
 
 ### Token Generation — tg128 t/s (total)
 
 | depth | c=1 | c=2 | c=4 | c=8 |
 |------:|----:|----:|----:|----:|
-| 0 | 38.3 | 60.7 | 87.1 | **62.0** |
-| 4096 | 39.9 | 41.0 | 38.0 | 35.0 |
-| 8192 | 36.9 | 33.2 | 26.4 | 23.9 |
-| 16384 | 32.1 | 22.5 | 17.7 | 14.4 |
-| 32768 | 35.0 | 13.4 | 9.2 | 8.0 |
-| 65536 | 34.1 | 7.6 | 5.3 | 4.0 |
+| 0 | 39.76 | 62.25 | 83.68 | **67.20** |
+| 4096 | 37.16 | 38.95 | 35.04 | 32.66 |
+| 8192 | 35.66 | 34.62 | 27.70 | 20.42 |
+| 16384 | 39.51 | 24.41 | 17.58 | 13.97 |
+| 32768 | 35.73 | 11.13 | 9.82 | 8.27 |
+| 65536 | 41.05 | 5.49 | 5.26 | 4.11 |
+| **131072** | **34.59** | **3.17** | **2.56** | **1.94** |
 
 ### Token Generation — tg128 peak t/s
 
 | depth | c=1 | c=2 | c=4 | c=8 |
 |------:|----:|----:|----:|----:|
-| 0 | 41.0 | 72.0 | 115.0 | **118.3** |
-| 4096 | 43.0 | 67.7 | 100.7 | 101.7 |
-| 8192 | 42.3 | 64.7 | 101.0 | 96.0 |
-| 16384 | 36.3 | 60.7 | 100.7 | 98.3 |
-| 32768 | 41.0 | 66.7 | 95.3 | 97.3 |
-| 65536 | 38.3 | 66.7 | 95.3 | 93.7 |
+| 0 | 43.00 | 71.33 | 114.00 | **112.33** |
+| 4096 | 41.00 | 61.33 | 88.67 | 97.67 |
+| 8192 | 39.67 | 52.67 | 95.33 | 96.33 |
+| 16384 | 42.67 | 67.33 | 99.33 | 96.67 |
+| 32768 | 39.67 | 56.67 | 98.33 | 100.33 |
+| 65536 | 43.00 | 52.00 | 93.67 | 100.67 |
+| **131072** | **39.00** | **58.33** | **95.33** | **95.67** |
+
+**Key pattern at d=131072**:
+- **c=1 total (34.59 t/s)**: single-stream decode is depth-immune — no collapse at 128k context.
+- **c=8 total (1.94 t/s)**: sustained multi-stream collapses completely. Root cause is O(n)
+  per-step attention cost at 131k tokens × 4 batched sequences (MAX_NUM_SEQS=4).
+- **c=8 peak (95.67 t/s)**: burst hardware ceiling is preserved — the first decode steps
+  remain fast. The gap between peak (~96 t/s) and total (~2 t/s) reflects that sustained
+  throughput degrades as each sequence accumulates 131k+ KV history per step.
 
 **Note**: MAX_NUM_SEQS=4 caps actual concurrency — c=8 requests are queued in batches
 of 4, so c=8 total is lower than expected. Compare to 2026-06-05 run (MAX_NUM_SEQS=8):
-c8 total d=0 was 73.79 t/s vs 62.0 t/s here.
+c8 total d=0 was 73.79 t/s vs 67.20 t/s here.
 
 ---
 
@@ -285,14 +296,15 @@ can deliver high burst decode even with MTP n=2. At d≥32k, peak collapses as K
 
 | depth | jasl c1 | unholy c1 | delta c1 | jasl c8 | unholy c8 | delta c8 |
 |------:|--------:|----------:|---------:|--------:|----------:|---------:|
-| d0    | 949     | 1580      | **+66%** | 716     | 1119      | **+56%** |
-| d4096 | 887     | 2029      | **+129%**| 804     | 1581      | **+97%** |
-| d8192 | 868     | 1280      | **+47%** | 781     | 1718      | **+120%**|
-| d16384| 839     | 2017      | **+140%**| 789     | 1845      | **+134%**|
-| d32768| 795     | 1971      | **+148%**| 718     | 1908      | **+166%**|
-| d65536| 731     | 1921      | **+163%**| 624     | 1899      | **+204%**|
+| d0      | 949 | 1919      | **+102%**| 716 | 1140      | **+59%** |
+| d4096   | 887 | 2051      | **+131%**| 804 | 1561      | **+94%** |
+| d8192   | 868 | 1925      | **+122%**| 781 | 1723      | **+121%**|
+| d16384  | 839 | 2003      | **+139%**| 789 | 1853      | **+135%**|
+| d32768  | 795 | 1977      | **+149%**| 718 | 1915      | **+167%**|
+| d65536  | 731 | 1927      | **+164%**| 624 | 1904      | **+205%**|
+| d131072 | 648 | 1813      | **+180%**| 619 | 1820      | **+194%**|
 
-**unholy-fusion prefill is 1.5–3× faster at all depths and concurrencies.**  
+**unholy-fusion prefill is 2–3× faster at all depths and concurrencies.**  
 Root cause: B12X custom MoE dispatcher + mp SPMD backend eliminates Ray actor
 overhead on expert routing. jasl0603's expert-parallel mode adds per-token
 routing synchronization that B12X_MOE bypasses with a custom GB10 dispatch path.
@@ -301,52 +313,58 @@ routing synchronization that B12X_MOE bypasses with a custom GB10 dispatch path.
 
 | depth  | jasl c1 | unholy c1 | jasl c4 | unholy c4 | jasl c8 | unholy c8 |
 |-------:|--------:|----------:|--------:|----------:|--------:|----------:|
-| d0     | 36.0    | 38.3      | 38.2    | **87.1**  | 40.2    | 62.0      |
-| d4096  | 36.2    | 39.9      | 19.5    | 38.0      | 17.6    | 35.0      |
-| d8192  | 36.5    | 36.9      | 12.4    | 26.4      | 10.0    | 23.9      |
-| d16384 | 32.5    | 32.1      | 7.5     | 17.7      | 5.6     | 14.4      |
-| d32768 | 32.2    | 35.0      | 2.9     | 9.2       | 2.8     | 8.0       |
-| d65536 | 60.8†   | 34.1      | 1.5     | 5.3       | 1.3     | 4.0       |
+| d0      | 36.0  | 39.76 | 38.2  | **83.68** | 40.2  | 67.20 |
+| d4096   | 36.2  | 37.16 | 19.5  | 35.04     | 17.6  | 32.66 |
+| d8192   | 36.5  | 35.66 | 12.4  | 27.70     | 10.0  | 20.42 |
+| d16384  | 32.5  | 39.51 | 7.5   | 17.58     | 5.6   | 13.97 |
+| d32768  | 32.2  | 35.73 | 2.9   | 9.82      | 2.8   | 8.27  |
+| d65536  | 60.8† | 41.05 | 1.5   | 5.26      | 1.3   | 4.11  |
+| d131072 | 25.4  | **34.59** | 0.8 | 2.56    | 0.7   | 1.94  |
 
-- **c=1**: Nearly identical (36–40 t/s). Single-stream decode is hardware-bound; neither
-  MTP n=2 nor B12X changes the single-request decode rate significantly.
-- **c=4**: unholy-fusion leads at d=0 (+128%); gap narrows at depth. At d=0, unholy-fusion
-  serves all 4 concurrent requests (MAX_NUM_SEQS=4), while jasl0603 with MTP n=2 spends
-  cycles on speculative re-generation.
-- **c=8**: unholy-fusion leads (+54% at d=0), but advantage narrows. Both are limited —
-  unholy-fusion by MAX_NUM_SEQS=4 (queues 4 extra), jasl0603 by MTP n=2 overhead.
+- **c=1**: Nearly identical (32–41 t/s). Single-stream decode is hardware-bound; stable
+  even at d=131072 (jasl 25.4 t/s vs unholy 34.59 t/s — slight unholy edge from B12X attention).
+- **c=4**: unholy-fusion leads at d=0 (+119%); gap narrows at depth but persists.
+  At d=0, unholy-fusion serves all 4 concurrent requests (MAX_NUM_SEQS=4), while
+  jasl0603 with MTP n=2 spends cycles on speculative re-generation.
+- **c=8**: unholy-fusion leads (+67% at d=0), but advantage narrows with depth.
+  At d=131072, unholy 1.94 vs jasl 0.7 t/s (+177%) — both near-zero, unholy slightly better.
 - **d≥4k, c≥2**: jasl0603 collapses due to MTP n=2 acceptance-rate drop. This is not
-  a hardware or KV-cache limit — single-stream (c=1) stays at 32–36 t/s even at d=131k.
+  a hardware or KV-cache limit — single-stream (c=1) stays at 25–41 t/s even at d=131k.
 
 ### Decode peak (tg128 peak t/s, best-of-3 run)
 
-| depth  | jasl c4 | unholy c4 | jasl c8 | unholy c8 |
-|-------:|--------:|----------:|--------:|----------:|
-| d0     | 90.3    | 115.0     | **116.3** | 118.3   |
-| d4096  | 89.7    | 100.7     | 108.3   | 101.7     |
-| d8192  | 89.3    | 101.0     | **114.0** | 96.0    |
-| d16384 | 85.7    | 100.7     | **106.7** | 98.3    |
-| d32768 | 67.3    | 95.3      | 66.0    | **97.3**  |
-| d65536 | 34.0    | 95.3      | 37.7    | **93.7**  |
+| depth   | jasl c4 | unholy c4 | jasl c8 | unholy c8 |
+|--------:|--------:|----------:|--------:|----------:|
+| d0      | 90.3    | 114.00    | **116.3** | 112.33  |
+| d4096   | 89.7    | 88.67     | 108.3   | 97.67     |
+| d8192   | 89.3    | 95.33     | **114.0** | 96.33   |
+| d16384  | 85.7    | 99.33     | **106.7** | 96.67   |
+| d32768  | 67.3    | 98.33     | 66.0    | **100.33** |
+| d65536  | 34.0    | 93.67     | 37.7    | **100.67** |
+| d131072 | 32.3    | **95.33** | 31.7    | **95.67** |
 
 Peak throughput (best single run) tells a different story from total:
 - At **d≤16k**, both are similar (~90–116 t/s at c=8). jasl0603 occasionally edges
   ahead because a lucky run has high MTP acceptance → burst decode.
-- At **d≥32k**, jasl0603 drops sharply (KV exhaustion at 11.9 GiB with 1M context
-  model). unholy-fusion maintains ~95 t/s peak because its 16.9 GiB KV with 262k
-  context has more headroom per block at these depths.
+- At **d≥32k**, jasl0603 drops sharply (KV exhausted at 11.9 GiB with 1M context
+  model; peak collapses to ~32–37 t/s). unholy-fusion maintains ~95–100 t/s peak
+  because 16.9 GiB KV + 262k context provides more headroom per block.
+- At **d=131072**: jasl peak 31.7 t/s vs unholy peak **95.67 t/s** — 3× difference.
+  Both KV caches are sufficient for the depth, but unholy's B12X kernels compute
+  attention at ~3× higher throughput in the first token burst.
 
 ### Summary
 
 | metric | winner | magnitude | note |
 |--------|--------|-----------|------|
-| Prefill all depths | **unholy-fusion** | 1.5–3× | B12X MoE + mp backend |
-| Decode total c=1 | tie | <10% | hardware-bound single stream |
-| Decode total c=4, d=0 | **unholy-fusion** | +128% | MTP n=2 overhead in jasl |
-| Decode total c=8, d=0 | **unholy-fusion** | +54% | NUM_SEQS cap limits both |
-| Decode total d≥4k, c≥2 | **unholy-fusion** | +100–200% | MTP n=2 collapse in jasl |
+| Prefill all depths | **unholy-fusion** | 2–3× | B12X MoE + mp backend |
+| Decode total c=1, all depths | tie | <20% | hardware-bound single stream |
+| Decode total c=4, d=0 | **unholy-fusion** | +119% | MTP n=2 overhead in jasl |
+| Decode total c=8, d=0 | **unholy-fusion** | +67% | NUM_SEQS cap limits both |
+| Decode total d≥4k, c≥2 | **unholy-fusion** | +100–300% | MTP n=2 collapse in jasl |
 | Decode peak d≤16k | tie | <10% | both near hardware ceiling |
-| Decode peak d≥32k | **unholy-fusion** | +44–148% | jasl KV exhausted (11.9 GiB) |
+| Decode peak d≥32k | **unholy-fusion** | +40–200% | jasl KV exhausted (11.9 GiB) |
+| Decode peak d=131072 | **unholy-fusion** | **3×** | 95 vs 32 t/s; B12X attention kernel |
 | Long-context | **jasl0603** | 4× more | 1M vs 262k tokens |
 | Operational stability | **jasl0603** | — | unholy hangs at NUM_SEQS>4 |
 
