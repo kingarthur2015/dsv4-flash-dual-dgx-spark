@@ -1,0 +1,129 @@
+# =============================================================================
+# 🦐 DSV4 Flash Dual DGX Spark — docker-compose.yml
+# Simplified version — full version at github.com/bjk110/spark_vllm_docker
+# 简化版，完整版见bjk110/spark_vllm_docker
+# 
+# ⚠️ IMPORTANT: All NCCL/vLLM env vars MUST be declared in the environment:
+#    section of EACH service. .env alone is NOT enough!
+# 关键：所有NCCL/vLLM变量必须在每个服务的environment段显式声明！
+# =============================================================================
+
+services:
+  head:
+    image: ${VLLM_IMAGE}
+    container_name: vllm-spark-head
+    profiles: ["head"]
+    network_mode: host
+    ipc: host
+    environment:
+      # Role
+      - ROLE=head
+      - CLUSTER_MODE=${CLUSTER_MODE:-dual-rdma}
+      - TP_SIZE=${TP_SIZE:-2}
+      - DISTRIBUTED_BACKEND=${DISTRIBUTED_BACKEND:-mp}
+      
+      # Model
+      - MODEL_CONTAINER_PATH=${MODEL_CONTAINER_PATH}
+      - SERVED_MODEL_NAME=${SERVED_MODEL_NAME}
+      - HOST_PORT=${HOST_PORT:-8000}
+      - MAX_MODEL_LEN=${MAX_MODEL_LEN:-8192}
+      - MAX_NUM_SEQS=${MAX_NUM_SEQS:-4}
+      - GPU_MEMORY_UTILIZATION=${GPU_MEMORY_UTILIZATION:-0.78}
+      - VLLM_EXTRA_ARGS=${VLLM_EXTRA_ARGS:-}
+      
+      # ⭐ CRITICAL: GB10 NCCL params
+      - NCCL_P2P_DISABLE=${NCCL_P2P_DISABLE:-1}
+      - NCCL_NVLS_ENABLE=${NCCL_NVLS_ENABLE:-0}
+      - NCCL_NET=${NCCL_NET:-Socket}
+      - NCCL_IB_DISABLE=${NCCL_IB_DISABLE:-1}
+      - NCCL_DEBUG=${NCCL_DEBUG:-WARN}
+      
+      # ⭐ CRITICAL: SM12x fixes
+      - VLLM_USE_FLASHINFER_SAMPLER=${VLLM_USE_FLASHINFER_SAMPLER:-0}
+      - VLLM_MEMORY_PROFILER_ESTIMATE_CUDAGRAPHS=${VLLM_MEMORY_PROFILER_ESTIMATE_CUDAGRAPHS:-0}
+      - FLASHINFER_DISABLE_VERSION_CHECK=${FLASHINFER_DISABLE_VERSION_CHECK:-1}
+      
+      # Performance
+      - VLLM_TRITON_MLA_SPARSE=${VLLM_TRITON_MLA_SPARSE:-1}
+      - PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
+      
+      # Runtime
+      - NVIDIA_VISIBLE_DEVICES=all
+      - VLLM_USAGE_SOURCE=production
+      
+      # RoCE networking
+      - VLLM_HOST_IP=${HEAD_ROCE_IP:-}
+      - HEAD_ROCE_IP=${HEAD_ROCE_IP:-}
+      - WORKER_ROCE_IP=${WORKER_ROCE_IP:-}
+      - ROCE_IF_NAME=${ROCE_IF_NAME:-}
+      - IB_HCA_NAME=${IB_HCA_NAME:-}
+      - NCCL_SOCKET_IFNAME=${ROCE_IF_NAME:-}
+      - NCCL_IB_HCA=${IB_HCA_NAME:-}
+    
+    volumes:
+      - ${MODEL_PATH}:${MODEL_CONTAINER_PATH}:ro
+      - ./.cache/vllm:/root/.cache/vllm
+      - ./patches:/patches:ro
+      - ./entrypoints/entrypoint.sh:/entrypoint.sh:ro
+    
+    entrypoint: ["bash", "/entrypoint.sh"]
+    
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+    shm_size: "64gb"
+    restart: "no"
+
+  worker:
+    image: ${VLLM_IMAGE}
+    container_name: vllm-spark-worker
+    profiles: ["worker"]
+    network_mode: host
+    ipc: host
+    environment:
+      - ROLE=worker
+      - CLUSTER_MODE=${CLUSTER_MODE:-dual-rdma}
+      - TP_SIZE=${TP_SIZE:-2}
+      - DISTRIBUTED_BACKEND=${DISTRIBUTED_BACKEND:-mp}
+      - MODEL_CONTAINER_PATH=${MODEL_CONTAINER_PATH}
+      - SERVED_MODEL_NAME=${SERVED_MODEL_NAME}
+      - HOST_PORT=${HOST_PORT:-8000}
+      - MAX_MODEL_LEN=${MAX_MODEL_LEN:-8192}
+      - MAX_NUM_SEQS=${MAX_NUM_SEQS:-4}
+      - GPU_MEMORY_UTILIZATION=${GPU_MEMORY_UTILIZATION:-0.78}
+      - VLLM_EXTRA_ARGS=${VLLM_EXTRA_ARGS:-}
+      
+      # ⭐ Same critical params as head
+      - NCCL_P2P_DISABLE=${NCCL_P2P_DISABLE:-1}
+      - NCCL_NVLS_ENABLE=${NCCL_NVLS_ENABLE:-0}
+      - NCCL_NET=${NCCL_NET:-Socket}
+      - NCCL_IB_DISABLE=${NCCL_IB_DISABLE:-1}
+      - VLLM_USE_FLASHINFER_SAMPLER=${VLLM_USE_FLASHINFER_SAMPLER:-0}
+      - VLLM_MEMORY_PROFILER_ESTIMATE_CUDAGRAPHS=${VLLM_MEMORY_PROFILER_ESTIMATE_CUDAGRAPHS:-0}
+      
+      # Worker-specific networking
+      - VLLM_HOST_IP=${WORKER_ROCE_IP:-}
+      - HEAD_ROCE_IP=${HEAD_ROCE_IP:-}
+      - WORKER_ROCE_IP=${WORKER_ROCE_IP:-}
+    
+    volumes:
+      - ${MODEL_PATH}:${MODEL_CONTAINER_PATH}:ro
+      - ./.cache/vllm:/root/.cache/vllm
+      - ./patches:/patches:ro
+      - ./entrypoints/entrypoint.sh:/entrypoint.sh:ro
+    
+    entrypoint: ["bash", "/entrypoint.sh"]
+    
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+    shm_size: "64gb"
+    restart: "no"
