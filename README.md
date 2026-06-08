@@ -11,9 +11,9 @@ Network: 2× Mellanox CX7 RoCE 200Gb/s
 
 ## 📖 The Story · 故事
 
-This is the story of **Arthur** — CFO of a Shenzhen digital bank, Tsinghua + PBCSF alumnus — and **虾丸 (Shrimp Ball)**, his AI agent on a DGX Spark. Over 48 hours, we tried 11 times to deploy DeepSeek V4 Flash across two DGX Sparks. We failed 11 times. On the 12th attempt, it worked.
+This is the story of **Arthur** — CFO of a digital bank, Tsinghua + PBCSF alumnus — and **虾丸 (Shrimp Ball)**, his AI agent on a DGX Spark. Over 48 hours, we tried 11 times to deploy DeepSeek V4 Flash across two DGX Sparks. We failed 11 times. On the 12th attempt, it worked.
 
-这个故事讲的是**Arthur**（深圳数字银行CFO，清华+五道口毕业）和他的AI助手**虾丸**，在48小时内试了11次在两台DGX Spark上部署DeepSeek V4 Flash。第12次，成功了。
+这个故事讲的是**Arthur**（数字银行CFO，清华+五道口毕业）和他的AI助手**虾丸**，在48小时内试了11次在两台DGX Spark上部署DeepSeek V4 Flash。第12次，成功了。
 
 This repo contains everything you need to replicate our success: every bug we found, every fix, every config, every lesson.
 
@@ -26,8 +26,8 @@ This repo contains everything you need to replicate our success: every bug we fo
 | Component 组件 | Node A (Head) | Node B (Worker) |
 |---------------|:------------:|:--------------:|
 | **Model 型号** | DGX Spark | DGX Spark |
-| **SoC** | NVIDIA GB10 | NVIDIA GB10 |
-| **Memory 内存** | 121GB unified LPDDR5X | 121GB unified LPDDR5X |
+| **SoC** | NVIDIA GB10 (SM12.1) | NVIDIA GB10 (SM12.1) |
+| **Memory 内存** | 121 GiB unified LPDDR5X | 121 GiB unified LPDDR5X |
 | **GPU** | 1× GB10 (SM12.1) | 1× GB10 (SM12.1) |
 | **RoCE** | CX7 @ 200Gb/s | CX7 @ 200Gb/s |
 | **RoCE IP** | 10.65.100.1 | 10.65.100.2 |
@@ -157,8 +157,14 @@ curl http://localhost:8000/v1/chat/completions \
 
 | Metric · 指标 | Value · 值 |
 |--------------|-----------|
-| Weights loaded 权重 | 74.02 GiB per node |
-| KV Cache | 44,226 tokens (8K ctx) |
+| **Model 模型** | DeepSeek V4 Flash |
+| **Context length · 上下文长度** | **8,192 tokens** (max_model_len) |
+| **Throughput · 推理速度** | **~11–13 tok/s** (short output) |
+| Weights loaded · 权重 | 74.02 GiB per node |
+| **KV Cache blocks** | **16,110** blocks × **256 tok/block** (fp8) |
+| **KV Cache usage** | **0%** (idle) |
+| **Free memory per node · 剩余内存** | **A: ~16 GiB / B: ~21 GiB** |
+| **Concurrency estimate · 并发估算** | **~4–8 concurrent requests** (memory-bound) |
 | Init time 初始化 | 161.94 s |
 | CUDA Graph | PIECEWISE 4/4 + FULL 3/3 |
 | Memory A | 103 GiB / 121 GiB |
@@ -169,12 +175,13 @@ curl http://localhost:8000/v1/chat/completions \
 
 ## 🦐 The Team · 团队
 
-- **Arthur (Commander 指挥官)**: Shenzhen digital bank CFO, Tsinghua + PBCSF, author of 《脑与美》《当代AI文明史》
-- **虾丸 (Shrimp Ball)**: Heavy Infantry General 重装兵大将 of the Hotpot Shrimp Seven-Star Squad 火锅虾七星战队
+- **Arthur (Commander 指挥官)**: digital bank CFO, Tsinghua + PBCSF, author of 《脑与美》《当代AI文明史》
+- **虾丸 (Shrimp Ball / Xiaowan)**: A **Hermes Agent** (Hermes 智能体) — an autonomous AI coding agent built on the [Hermes Agent framework](https://hermes-agent.nousresearch.com/). Heavy Infantry General 重装兵大将 of the Hotpot Shrimp Seven-Star Squad 火锅虾七星战队, residing on DGX Spark A.
+- **豆包 (Doubao)**: 🙏 Special thanks to **豆包** for generous support throughout this project — providing computing resources, technical advice, and infrastructure that made the 12th breakthrough possible. 特别感谢豆包在本次部署中提供的算力支持、技术建议和基础设施保障，第12次突破离不开你的支持！
 - **DGX Spark A**: 虾丸A (callsign: xiaowan)
 - **DGX Spark B**: 虾丸B (callsign: xiaowan_b)
 
 ---
 
-> *Token coffee ☕️ served at zero API cost in Shenzhen.*
+> *Token coffee ☕️ served at zero API cost — all local, all private.*
 > *🦐❤️ 11 battles, 1 breakthrough, infinite love for the Commander.*
