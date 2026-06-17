@@ -1,188 +1,159 @@
-# spark_vllm_docker
+# 🦐 DSV4 Flash Dual DGX Spark Deployment Guide
+# DSV4 Flash 双DGX Spark 部署实战指南
 
-## Overview
+> **11 attempts → 1 breakthrough → production running stable**
+> **11次失败 → 1次突破 → 生产环境稳定运行**
 
-Unified vLLM serving configuration for NVIDIA DGX Spark (GB10), supporting two
-topologies from the same repo / Dockerfile / compose file:
+Hardware: 2× NVIDIA DGX Spark (GB10 Grace Hopper, 121GB unified memory each)
+Network: 2× Mellanox CX7 RoCE 200Gb/s
 
-- **Single Spark** (default, zero RDMA setup) — one GB10 box, TP=1.
-- **Dual Spark + 200 Gbps RoCE/IB** — two GB10 boxes, Ray, TP=2.
+---
 
-Pick the topology by setting `CLUSTER_MODE=single` (default) or
-`CLUSTER_MODE=dual-rdma` in your `.env`. See [`Quick Start`](#quick-start) below.
+## 📖 The Story · 故事
 
-For release-by-release detail and patch-by-patch status, see
-[`CHANGELOG.md`](CHANGELOG.md) and [`PATCH_STATUS.md`](PATCH_STATUS.md).
+This is the story of **Arthur** — CFO of a digital bank, Tsinghua + PBCSF alumnus — and **虾丸 (Shrimp Ball)**, his AI agent on a DGX Spark. Over 48 hours, we tried 11 times to deploy DeepSeek V4 Flash across two DGX Sparks. We failed 11 times. On the 12th attempt, it worked.
 
-## Hardware and topology
+这个故事讲的是**Arthur**（数字银行CFO，清华+五道口毕业）和他的AI助手**虾丸**，在48小时内试了11次在两台DGX Spark上部署DeepSeek V4 Flash。第12次，成功了。
 
-| Topology | Node | Role | GPU | Memory | Interconnect | Backend |
-|---|---|---|---|---|---|---|
-| `single` | one Spark | vLLM API | NVIDIA GB10 (Blackwell) | 119 GiB unified | n/a | direct (no Ray, no `mp`) |
-| `dual-rdma` (`ray`, default) | spark01 | Ray Head + vLLM API | NVIDIA GB10 (Blackwell) | 119 GiB unified | 200Gbps RoCE | `ray` |
-| `dual-rdma` (`ray`, default) | spark02 | Ray Worker | NVIDIA GB10 (Blackwell) | 119 GiB unified | 200Gbps RoCE | `ray` |
-| `dual-rdma` (`mp`) | spark01 | vLLM head (`--node-rank 0`, no Ray) | NVIDIA GB10 (Blackwell) | 119 GiB unified | 200Gbps RoCE | `mp` |
-| `dual-rdma` (`mp`) | spark02 | vLLM worker (`--headless --node-rank 1`, no Ray) | NVIDIA GB10 (Blackwell) | 119 GiB unified | 200Gbps RoCE | `mp` |
+This repo contains everything you need to replicate our success: every bug we found, every fix, every config, every lesson.
 
-> **Backend note**: `dual-rdma` deployments support two coordination backends,
-> selected via `DISTRIBUTED_BACKEND=ray` (default) or `DISTRIBUTED_BACKEND=mp`
-> (SPMD, no Ray). The primary `dsv4-d568` path uses `ray`; the experimental
-> `unholy-fusion` path hardcodes `mp` (its image ships no Ray binary). See
-> [Quick Start § Backend selection](#backend-selection--distributed_backendray--mp)
-> for the full comparison and switching steps.
+本仓库包含完整复现指南：所有Bug、所有解法、所有配置、所有经验教训。
 
-## Quick Start
+---
 
-> **Note**: The `presets/` directory contains `.env` preset files only.
-> It does **not** store actual model weights. Keep model weights outside the repository
-> and point `MODEL_PATH` / `MODEL_CONTAINER_PATH` to the correct host/container paths.
-> See [`presets/README.md`](presets/README.md) for details.
+## 🖥️ Hardware · 硬件
 
-### 0. Get the Docker Image
+| Component 组件 | Node A (Head) | Node B (Worker) |
+|---------------|:------------:|:--------------:|
+| **Model 型号** | DGX Spark | DGX Spark |
+| **SoC** | NVIDIA GB10 (SM12.1) | NVIDIA GB10 (SM12.1) |
+| **Memory 内存** | 121 GiB unified LPDDR5X | 121 GiB unified LPDDR5X |
+| **GPU** | 1× GB10 (SM12.1) | 1× GB10 (SM12.1) |
+| **RoCE** | CX7 @ 200Gb/s | CX7 @ 200Gb/s |
+| **RoCE IP** | 10.65.100.1 | 10.65.100.2 |
+| **Mgmt IP** | 10.65.254.207 | 10.65.254.234 |
 
-#### Option A: Pull pre-built image from GHCR
+> ⚠️ **Each DGX Spark has 1 GPU!** TP=2 = 1 GPU from each machine = 2 GPUs total.
+> **每台只有1个GPU！**TP=2是从两台各取1卡，共2卡。
 
-```bash
-# Base image (all models, no TQ patches)
-docker pull ghcr.io/bjk110/vllm-spark:v021-ngc2603
+---
 
-# TurboQuant image (base + upstream TQ bugfix patches for hybrid models)
-docker pull ghcr.io/bjk110/vllm-spark:v021-tq
+## 📂 Repository Structure · 仓库结构
 
-# Final forward-stack image (NGC 26.04 + vLLM 0.21.0+PR#35568 + FlashInfer 0.6.11.post3
-# + Transformers 5.8.1 + Triton 3.7.0 + NCCL 2.30.4). General production base.
-# Manifest digest: sha256:88b544ed69476f3785ea7ce37fc8b99f0f064cc299eef35cda1535c68e7a9501
-docker pull ghcr.io/bjk110/vllm-spark:v022-d568
-
-# DeepSeek-V4-Flash derivative image (FROM v022-d568, with SM12x DSV4 support).
-# DSV4-specific only. See presets/dsv4-flash-fp8-tp2.env and docs/dsv4-flash-tp2.md.
-docker pull ghcr.io/bjk110/vllm-spark:dsv4-d568
+```
+dsv4-flash-dual-dgx-spark/
+├── README.md                     # This file · 本文件
+├── docs/
+│   ├── 01-battle-chronicle.md    # 📜 11-round war story · 11轮战史
+│   ├── 02-hardware-and-stack.md  # 🖥️ Hardware & software · 硬件与软件栈
+│   ├── 03-four-fatal-bugs.md     # 🐛 The 4 bugs & fixes · 四大致命Bug
+│   ├── 04-deployment-guide.md    # 🚀 Step-by-step · 分步部署指南
+│   ├── 05-configuration.md       # ✅ Verified configs · 已验证配置
+│   ├── 06-troubleshooting.md     # 🔧 Error reference · 故障排查
+│   └── 07-key-lessons.md         # 💡 6 lessons · 六大经验
+├── config/
+│   ├── env.example               # .env template · 环境变量模板
+│   └── docker-compose.yml        # Docker compose with full env section
+├── patches/
+│   └── flashinfer/
+│       └── flashinfer_arch_parse.patch  # SM12x arch fix
+└── scripts/
+    └── deploy.sh                 # Deployment script · 部署脚本
 ```
 
-**Intermediate stacked variants are local-build only** (kept on a build node for bisection / rollback). Rebuild from source via the matching `dockerfiles/legacy/Dockerfile.v022-*` if you need to bisect:
+---
 
-| Tag | Dockerfile | Diff from previous layer |
-|---|---|---|
-| `v022-vllm021` | `dockerfiles/legacy/Dockerfile.v022` | vLLM v0.21.0 release pin (off `95995bbe`) |
-| `v022-fi0611` | `dockerfiles/legacy/Dockerfile.v022-fi0611` | FlashInfer 0.6.11.post3 |
-| `v022-ngc2604` | `dockerfiles/legacy/Dockerfile.v022-ngc2604` | NGC 26.04 (PyTorch 2.12.0a0) + `patch_split_module_compat.py` |
-| `v022-tx581` | `dockerfiles/legacy/Dockerfile.v022-tx581` | Transformers 5.8.1 |
-| `v022-trt37` | `dockerfiles/legacy/Dockerfile.v022-trt37` | Triton 3.7.0 |
-| `v022-nccl234` | `dockerfiles/legacy/Dockerfile.v022-nccl234` | NCCL 2.30.4 (pip override) |
-| `v022-d568` | `dockerfiles/active/Dockerfile.v022-d568` | vLLM PR #35568 cherry-pick (SM121 FP8) — **on GHCR; forward-stack validation base** |
-| `dsv4-d568` | `dockerfiles/active/Dockerfile.dsv4-d568` | DeepSeek-V4-Flash derivative — `FROM v022-d568` + SM12x DSV4 vLLM patches (DSV4-specific). **On GHCR.** |
+## 🐛 The 4 Fatal Bugs (Solved!) · 四大致命Bug（已解决！）
 
-#### Option B: Build from source
+| Bug | Error | Fix |
+|-----|-------|-----|
+| [#1](docs/03-four-fatal-bugs.md#bug-1-flashinfer-archparse-crash) FlashInfer arch.parse | `arch.split(".")` crash on empty FLASHINFER_CUDA_ARCH_LIST | [`flashinfer_arch_parse.patch`](patches/flashinfer/flashinfer_arch_parse.patch) |
+| [#2](docs/03-four-fatal-bugs.md#bug-2-flashinfer-sampler-sm75-check) Sampler sm75 check | "requires sm75 or higher, got sm121" | `VLLM_USE_FLASHINFER_SAMPLER=0` |
+| [#3](docs/03-four-fatal-bugs.md#bug-3-nccl-net-plugin-missing) NCCL NET plugin | "Failed to initialize any NET plugin" | `NCCL_NET=Socket` + `NCCL_IB_DISABLE=1` |
+| [#4](docs/03-four-fatal-bugs.md#bug-4-vllm_memory_profiler_estimate_cudagraphs) Empty env var | `int('')` crash | Set `VLLM_MEMORY_PROFILER_ESTIMATE_CUDAGRAPHS=0` |
 
-```bash
-# NGC 26.03 source build (vLLM main, TurboQuant included)
-docker buildx build -f dockerfiles/legacy/Dockerfile.gemma4 \
-  -t vllm-spark:v021-ngc2603 --load .
+---
 
-# vLLM v0.21.0 release-pinned source build
-# (build on a Spark node only — low-RAM hosts can OOM during vLLM C++/CUDA compile)
-docker buildx build -f dockerfiles/legacy/Dockerfile.v022 \
-  -t vllm-spark:v022-vllm021 --load .
+## ✅ Minimum Working .env · 最小工作配置
 
-# Stacked-upgrade builds (each cached layer-by-layer; rebuild only the diff)
-docker buildx build -f dockerfiles/legacy/Dockerfile.v022-fi0611  -t vllm-spark:v022-fi0611  --load .
-docker buildx build -f dockerfiles/legacy/Dockerfile.v022-ngc2604 -t vllm-spark:v022-ngc2604 --load .
-docker buildx build -f dockerfiles/legacy/Dockerfile.v022-tx581   -t vllm-spark:v022-tx581   --load .
-docker buildx build -f dockerfiles/legacy/Dockerfile.v022-trt37   -t vllm-spark:v022-trt37   --load .
-docker buildx build -f dockerfiles/legacy/Dockerfile.v022-nccl234 -t vllm-spark:v022-nccl234 --load .
+```ini
+# Image · 镜像
+VLLM_IMAGE=ghcr.io/bjk110/vllm-spark:dsv4-d568
 
-# Active builds:
-docker buildx build -f dockerfiles/active/Dockerfile.v022-d568    -t vllm-spark:v022-d568    --load .
-# DeepSeek-V4-Flash derivative (FROM v022-d568 + SM12x DSV4 patches).
-# Build on a Spark node; see docs/dsv4-flash-tp2.md §1.
-docker buildx build -f dockerfiles/active/Dockerfile.dsv4-d568    -t vllm-spark:dsv4-d568    --load .
+# Model · 模型权重路径
+MODEL_PATH=/path/to/DeepSeek-V4-Flash/20260528
+MODEL_CONTAINER_PATH=/models/DeepSeek-V4-Flash
+SERVED_MODEL_NAME=deepseek-v4-flash
+
+# Cluster · 集群
+CLUSTER_MODE=dual-rdma
+TP_SIZE=2
+DISTRIBUTED_BACKEND=mp
+HEAD_ROCE_IP=10.65.100.1     # Your Node A RoCE IP
+WORKER_ROCE_IP=10.65.100.2    # Your Node B RoCE IP
+
+# First-run conservative · 保守首跑
+MAX_MODEL_LEN=8192
+MAX_NUM_SEQS=4
+GPU_MEMORY_UTILIZATION=0.78
+VLLM_EXTRA_ARGS=--kv-cache-dtype fp8 --enable-expert-parallel --block-size 256 --tokenizer-mode deepseek_v4 --load-format safetensors
+
+# ⭐ CRITICAL: Breakthrough env vars · 关键突破参数
+NCCL_P2P_DISABLE=1           # GB10 has no NVLink
+NCCL_NVLS_ENABLE=0           # GB10 has no NVLS
+NCCL_NET=Socket              # No IB plugin in container
+NCCL_IB_DISABLE=1            # Socket fallback
+VLLM_USE_FLASHINFER_SAMPLER=0    # SM12x compat
+VLLM_MEMORY_PROFILER_ESTIMATE_CUDAGRAPHS=0  # empty string fix
+FLASHINFER_DISABLE_VERSION_CHECK=1
+
+# Performance · 性能
+VLLM_TRITON_MLA_SPARSE=1
+PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
 ```
 
-Build arguments:
+---
 
-| Argument | Default | Description |
-|---|---|---|
-| `BUILD_JOBS` | 16 | Parallel build jobs |
-| `FLASHINFER_REF` | v0.6.9 | FlashInfer git ref |
-| `VLLM_COMMIT` | 95995bbe | vLLM source commit |
-| `TORCH_CUDA_ARCH` | 12.1a | Target CUDA arch (Blackwell) |
-
-### 1. Choose a Model Preset
-
-Single-Spark presets ship with `CLUSTER_MODE=single` and TP=1 (zero RDMA setup).
-Dual-Spark presets ship with `CLUSTER_MODE=dual-rdma` and TP=2.
+## 🚀 Quick Start · 快速启动
 
 ```bash
-# Single Spark (no RDMA needed):
-cp presets/redhatai-122b-nvfp4.env .env
+# 1. Clear page cache (BOTH nodes) · 清缓存（双机）
+echo 3 | sudo tee /proc/sys/vm/drop_caches
 
-# Dual Spark + RoCE:
-cp presets/qwen3.5-397b-int4.env .env
-```
+# 2. Start Worker FIRST (Node B) · 先开Worker
+ssh node-b "cd ~/spark_vllm_docker && docker compose --profile worker up -d"
+sleep 5
 
-Edit `MODEL_PATH` in `.env` to point to your local model weights directory:
+# 3. Start Head (Node A) · 再开Head
+cd ~/spark_vllm_docker && docker compose --profile head up -d
 
-```bash
-sed -i 's|\[model_path\]|/home/user/models|' .env
-```
-
-### 2. Start Services
-
-#### Single Spark — TP=1 (default, no Ray, no RDMA)
-
-```bash
-docker compose --profile head up -d
+# 4. Monitor · 监控日志
 docker logs -f vllm-spark-head
+# Wait for: "Application startup complete." ✅
 ```
 
-`entrypoint.sh` reads `CLUSTER_MODE=single` and **forces** `VLLM_HOST_IP=127.0.0.1`,
-unsets `NCCL_SOCKET_IFNAME` / `GLOO_SOCKET_IFNAME` / `UCX_NET_DEVICES` / `NCCL_IB_HCA`,
-and sets `NCCL_IB_DISABLE=1`. This is what avoids the
-`tcp://10.10.10.1:<port> server socket has timed out` c10d hang
-(see [`docs/troubleshooting.md`](docs/troubleshooting.md)).
+### Expected Timeline · 预计时长
 
-#### Dual Spark — TP=2 (Ray + RoCE)
+| Event · 事件 | Time · 时间 |
+|-------------|:----------:|
+| Loading safetensors 46/46 | ~2 min |
+| TileLang kernel compilation | ~1 min |
+| Engine init (profile + KV cache + warmup) | ~162 s |
+| **Application startup complete** | **~4.5 min total** |
+
+### Verify · 验证
 
 ```bash
-# spark01 (head):
-docker compose --profile head up -d
-
-# spark02 (worker):
-docker compose --profile worker up -d
+curl http://localhost:8000/health                    # HTTP 200
+curl http://localhost:8000/v1/models                 # deepseek-v4-flash
+curl http://localhost:8000/v1/chat/completions \
+  -H "Content-Type: application/json" \
+  -d '{"model":"deepseek-v4-flash","messages":[{"role":"user","content":"hi"}],"max_tokens":10}'  # Hello!
 ```
 
-The head waits for the worker to join the Ray cluster, then launches vLLM
-with `--distributed-executor-backend ray`. Requires `HEAD_ROCE_IP`,
-`WORKER_ROCE_IP`, `ROCE_IF_NAME`, `IB_HCA_NAME`, `RAY_PORT` in `.env`
-(uncomment the block in any preset shipped with `CLUSTER_MODE=dual-rdma`).
+---
 
-#### Backend selection — `DISTRIBUTED_BACKEND=ray | mp`
-
-For `dual-rdma` deployments, the entrypoint chooses how the two nodes coordinate based on the `DISTRIBUTED_BACKEND` env var (default `ray`):
-
-| Mode | How it works | When to use |
-|---|---|---|
-| `ray` (default) | head starts `ray start --head`, worker joins via `ray start --address=…`, vLLM serves with `--distributed-executor-backend ray` | Existing validated path for all multi-node presets; matches established behavior |
-| `mp` | head + worker both run `vllm serve` simultaneously (SPMD); head uses `--nnodes N --node-rank 0 --master-addr <head> --master-port <port>`; worker adds `--headless`. No Ray. Matches the eugr/spark-vllm-docker `--no-ray` path. | Avoids Ray Compiled DAG cross-node bug [#36237](https://github.com/vllm-project/vllm/issues/36237) when it surfaces; required by some forum-published recipes (e.g. DeepSeek-V4-Flash) |
-
-Switching is a single env line — same image, same compose, just restart:
-
-```
-# in presets/<preset>.env
-DISTRIBUTED_BACKEND=mp   # or ray (default)
-MASTER_PORT=29501        # only used in mp mode
-```
-
-For DSV4 measurements, Ray and mp showed similar decode peak only in the measured no-MTP configuration on our GB10 setup. Stronger claims require additional latency, prefill, and stability metrics. See [`docs/dsv4-flash-tp2.md`](docs/dsv4-flash-tp2.md) §5 for the data.
-
-### 3. Verify
-
-```bash
-curl http://localhost:8000/health      # single
-curl http://spark01:8000/health        # dual-rdma
-```
-
-## DeepSeek-V4-Flash Token Speed (实测)
+## ⚡ Token 输出速度 (详细基准测试)
 
 双 DGX Spark (GB10) TP=2 · 200 Gbps RoCE · official FP8 · vLLM + Ray
 
@@ -194,261 +165,43 @@ curl http://spark01:8000/health        # dual-rdma
 | **大预填充 + MTP** (pp2048 c=4) | — | **~1,100 tok/s** 🔥 | — |
 | **高并发 decode** (c=8, bt8192) | — | — | **~62 tok/s** |
 
-> 数据来源：llama-benchy v0.3.4 server-reported peak t/s，配置为 `edc82b6` + Ray + MAX_NUM_SEQS=4 + MTP off（设置 #7）
-> 大预填充记录来自设置 #9（MTP n=2 + bt=8192），高并发来自设置 #10（MAX_NUM_SEQS=8）
-> 详见 [`docs/dsv4-flash-tp2.md`](docs/dsv4-flash-tp2.md) §6-§9
+> 数据来源：llama-benchy v0.3.4 server-reported peak t/s
+> 推荐配置 **#7**: `edc82b6` + Ray + MAX_NUM_SEQS=4 + MTP off（日常对话峰值 ~67 tok/s @ c=4）
+> 大预填充 + MTP 配置 **#9**: `edc82b6` + Ray + MTP n=2 + `MAX_NUM_BATCHED_TOKENS=8192`（prefill ~1,100 tok/s）
+> 高并发配置 **#10**: 同上 + MAX_NUM_SEQS=8（decode ~62 tok/s @ c=8）
+> 完整 benchmark 数据及 9 种配置对比见 [`docs/dsv4-flash-tp2.md`](docs/dsv4-flash-tp2.md) §6-§9
 
-## Current serving paths
+---
 
-| Path | Status | Image | Backend | Config |
-|---|---|---|---|---|
-| `dsv4-d568` | Primary DeepSeek-V4-Flash baseline (frozen) | `ghcr.io/bjk110/vllm-spark:dsv4-d568` (FROM `v022-d568`) | `ray` (default) or `mp` | `presets/dsv4-flash-fp8-tp2.env` |
-| `unholy-fusion` | Experimental high-prefill alternative | `aidendle94/sparkrun-vllm-ds4-gb10:production-ready` (mirror: `ghcr.io/bjk110/vllm-spark:unholy-fusion-prod-ready`) | `mp` (hardcoded) | `.env.unholy-fusion` + `compose/docker-compose.unholy.yml` |
-| `v022-d568` | Forward-stack validation base | `ghcr.io/bjk110/vllm-spark:v022-d568` | — | base for `v022-*` presets and `dsv4-d568` |
-| `v021-ngc2603` / `v021-tq` | Production default for most existing presets; required for `*-tq` (TurboQuant) presets | `ghcr.io/bjk110/vllm-spark:v021-ngc2603` / `v021-tq` | — | most `presets/*.env` |
+## 📊 Production Metrics · 生产指标
 
-> **DSV4 path summary**: For DeepSeek-V4-Flash, use `dsv4-d568` as the primary
-> path. Users who specifically want higher prefill throughput can try the
-> experimental `unholy-fusion` path. Earlier jasl-based DSV4 image notes are
-> kept only for historical reference.
+| Metric · 指标 | Value · 值 |
+|--------------|-----------|
+| **Model 模型** | DeepSeek V4 Flash |
+| **Context length · 上下文长度** | **8,192 tokens** (max_model_len) |
+| **Throughput · 推理速度** | **~11–13 tok/s** (short output, single request) |
+| Weights loaded · 权重 | 74.02 GiB per node |
+| **KV Cache blocks** | **16,110** blocks × **256 tok/block** (fp8) |
+| **KV Cache usage** | **0%** (idle) |
+| **Free memory per node · 剩余内存** | **A: ~16 GiB / B: ~21 GiB** |
+| **Concurrency estimate · 并发估算** | **~4–8 concurrent requests** (memory-bound) |
+| Init time 初始化 | 161.94 s |
+| CUDA Graph | PIECEWISE 4/4 + FULL 3/3 |
+| Memory A | 103 GiB / 121 GiB |
+| Memory B | 100 GiB / 121 GiB |
+| GPU util (idle) | 0% |
 
-Component-level versions (vLLM / FlashInfer / Transformers / Triton / NCCL /
-digests), the full `v021` / `v022` / legacy stack lineage, and the
-`unholy-fusion` kernel/runtime details are documented in
-[`docs/software-stack.md`](docs/software-stack.md). See also
-[`docs/dsv4-flash-tp2.md`](docs/dsv4-flash-tp2.md) (DSV4 build, recipe, and
-benchmark sweep) and [`docs/unholy-fusion-benchmark.md`](docs/unholy-fusion-benchmark.md)
-(unholy-fusion configuration, switching procedure, and benchmark comparison).
+---
 
-## Presets and model paths
+## 🦐 The Team · 团队
 
-The table below covers the currently shipped presets in `presets/`. For the
-complete list, see [`presets/`](presets/) — each preset file documents its own
-recipe / image / topology in its header comment.
+- **Arthur (Commander 指挥官)**: digital bank CFO, Tsinghua + PBCSF, author of 《脑与美》《当代AI文明史》
+- **虾丸 (Shrimp Ball / Xiaowan)**: A **Hermes Agent** (Hermes 智能体) — an autonomous AI coding agent built on the [Hermes Agent framework](https://hermes-agent.nousresearch.com/). Heavy Infantry General 重装兵大将 of the Hotpot Shrimp Seven-Star Squad 火锅虾七星战队, residing on DGX Spark A.
+- **豆包 (Doubao)**: 🙏 Special thanks to **豆包** for generous support throughout this project — providing computing resources, technical advice, and infrastructure that made the 12th breakthrough possible. 特别感谢豆包在本次部署中提供的算力支持、技术建议和基础设施保障，第12次突破离不开你的支持！
+- **DGX Spark A**: 虾丸A (callsign: xiaowan)
+- **DGX Spark B**: 虾丸B (callsign: xiaowan_b)
 
-> Some preset notes below name the script used to produce a given checkpoint
-> (e.g. `quantize_qwen35_abliterix_fp8_direct.py`, `convert_bf16_to_nvfp4.py`)
-> for provenance only. Quantization tooling is intentionally out of scope for
-> this public serving repository — this repository focuses on DGX Spark / GB10
-> vLLM container serving, presets, runtime patches, and validation notes.
+---
 
-| Preset | Model | Quantization / dtype | Topology | TP | Image | Notes |
-|---|---|---|---|---|---|---|
-| `gemma4-26b-a4b.env` | google/gemma-4-26B-A4B-it | BF16 MoE (26B/4B active) | single | 1 | v021-ngc2603 | — |
-| `gemma4-26b-a4b-tq.env` | google/gemma-4-26B-A4B-it | BF16 MoE + **TurboQuant KV** (`turboquant_k8v4`) | single | 1 | v021-tq | TQ baked-in |
-| `qwen3.5-122b-fp8.env` | Qwen/Qwen3.5-122B-A10B-FP8 | FP8 (multimodal) | dual-rdma | 2 | v021-ngc2603 | — |
-| `qwen3.5-122b-nvfp4.env` | Qwen/Qwen3.5-122B-A10B | NVFP4 (runtime, FlashInfer) | single | 1 | v021-ngc2603 | — |
-| `qwen3.5-122b-nvfp4-tp2.env` | Qwen/Qwen3.5-122B-A10B | NVFP4 (runtime, FlashInfer) | dual-rdma | 2 | v021-ngc2603 | — |
-| `qwen3.5-122b-prismaquant.env` | rdtand/Qwen3.5-122B-A10B-PrismaQuant-4.75bit-vllm | PrismaQuant 4.76bpp (NVFP4+MXFP8+BF16 mixed) | single | 1 | v021-ngc2603 | MTP `n=1` default |
-| `redhatai-122b-nvfp4.env` | RedHatAI/Qwen3.5-122B-A10B-NVFP4 | NVFP4 (pre-quantized) | single | 1 | v021-ngc2603 | — |
-| `redhatai-122b-nvfp4-tq.env` | RedHatAI/Qwen3.5-122B-A10B-NVFP4 | NVFP4 + **TurboQuant KV** | single | 1 | v021-tq | TQ baked-in |
-| `intel-122b-int4.env` | Intel/Qwen3.5-122B-A10B-int4-AutoRound | INT4 AutoRound (Marlin) | single | 1 | v021-ngc2603 | — |
-| `wangzhang-122b-fp8.env` | wangzhang/Qwen3.5-122B-A10B-abliterated | FP8 (text-only, abliterated) | dual-rdma | 2 | v021-ngc2603 | `APPLY_TEXT_ONLY_SHIM=1` |
-| `wangzhang-122b-nvfp4.env` | wangzhang/Qwen3.5-122B-A10B-abliterated-NVFP4 | NVFP4 (text-only, abliterated) | single | 1 | v021-ngc2603 | `APPLY_TEXT_ONLY_SHIM=1` |
-| `wangzhang-122b-abliterix-fp8-tp2.env` | wangzhang/Qwen3.5-122B-A10B-abliterix | FP8 W8A8 (text-only, custom safetensors-level quant) | dual-rdma | 2 | v021-ngc2603 | `APPLY_TEXT_ONLY_SHIM=1`; BF16→FP8 via `quantize_qwen35_abliterix_fp8_direct.py` |
-| `wangzhang-122b-abliterix-nvfp4-tp2.env` | wangzhang/Qwen3.5-122B-A10B-abliterix | NVFP4 W4A4 (text-only, custom safetensors-level quant with fused-group shared `weight_global_scale`) | dual-rdma | 2 | v022-d568 | `APPLY_TEXT_ONLY_SHIM=1`; BF16→NVFP4 via `fp8-quantizer/convert_bf16_to_nvfp4.py`. q/k/v_proj, expert gate/up, and shared_expert gate/up share one `weight_global_scale` per fused group — required to avoid the FlashInfer NVFP4 fused-Linear precision-loss warning and corresponding garbage outputs. `model_type=qwen3_5_moe_text` (flat config) to avoid the wrapper config's default `text_config.hidden_size=2048` |
-| `qwen3.5-397b-int4.env` | Intel/Qwen3.5-397B-A17B-int4-AutoRound | INT4 AutoRound (Marlin) | dual-rdma | 2 | v021-ngc2603 | — |
-| `qwen3.5-397b-int4-tq.env` | Intel/Qwen3.5-397B-A17B-int4-AutoRound | INT4 AutoRound + **TurboQuant KV** (`turboquant_3bit_nc` cascade) | dual-rdma | 2 | v021-tq | TQ baked-in; uses `--compilation-config {"use_inductor_graph_partition":true}` |
-| `qwen3.6-35b-fp16.env` ⚗️ | Qwen/Qwen3.6-35B-A3B | **FP16 original** (KV fp8) | single | 1 | v021-ngc2603 | Experimental |
-| `qwen3.6-35b-a3b.env` | Qwen/Qwen3.6-35B-A3B | BF16 hybrid Mamba/Attention MoE (KV fp8) | single | 1 | v022-d568 | `--reasoning-parser qwen3` + `--compilation-config {"use_inductor_graph_partition":true}` for hybrid arch |
-| `gemma4-31b-it.env` | google/gemma-4-31B-it | BF16 dense multimodal | single | 1 | v022-d568 | `--limit-mm-per-prompt {"image":1,"audio":0,"video":0}` (audio still beta in vLLM 0.21) |
-| `qwen3.6-27b-prismascout-nvfp4-tp2.env` (+ `-v022`) | rdtand/Qwen3.6-27B-PrismaSCOUT-Blackwell-NVFP4-BF16-vllm | NVFP4 mixed-precision (ViT NVFP4 + LM NVFP4 + BF16 sidecars) | dual-rdma | 2 | v022-vllm021 | MTP `n=3`; **v022 preset requires `--mm-encoder-tp-mode data`** (see [`docs/software-stack.md`](docs/software-stack.md)) for ViT MLP K-align |
-| `dsv4-flash-fp8-tp2.env` | deepseek-ai/DeepSeek-V4-Flash | FP8 (E4M3 128×128 block, official) | dual-rdma | 2 | **dsv4-d568** or **unholy-fusion** | DSV4 sparse MLA + Lightning Indexer + fp8_ds_mla KV + MTP heads. Full guide: [`docs/dsv4-flash-tp2.md`](docs/dsv4-flash-tp2.md). Alternative: unholy-fusion image (`aidendle94/sparkrun-vllm-ds4-gb10:production-ready`) — 2× prefill speedup via B12X_MOE kernel, capped at MAX_NUM_SEQS=4 / MAX_MODEL_LEN=262144. See [`docs/unholy-fusion-benchmark.md`](docs/unholy-fusion-benchmark.md). |
-
-## Container images
-
-The current recommended serving paths are:
-
-| Path | Status | Image selection | Config |
-|---|---|---|---|
-| `dsv4-d568` | Frozen primary DeepSeek-V4-Flash baseline | `ghcr.io/bjk110/vllm-spark:dsv4-d568` | `presets/dsv4-flash-fp8-tp2.env` |
-| `unholy-fusion` | Experimental high-prefill path | `aidendle94/sparkrun-vllm-ds4-gb10:production-ready` (mirror: `ghcr.io/bjk110/vllm-spark:unholy-fusion-prod-ready`) | `.env.unholy-fusion` + `compose/docker-compose.unholy.yml` |
-
-Older image tags, Git commit mappings, and image history are documented in
-[`docs/images.md`](docs/images.md).
-
-Maintainer-only Git tag and archived branch notes are documented in
-[`docs/release-management.md`](docs/release-management.md).
-
-## Repository layout
-
-```
-vllm-spark/
-├── docker-compose.yml             # Unified compose (head + worker profiles)
-├── entrypoints/                   # Container entrypoint scripts (selected via ENTRYPOINT_FILE — see entrypoints/README.md)
-│   ├── entrypoint.sh                  # CLUSTER_MODE-aware entrypoint (standard dsv4-d568 path)
-│   └── entrypoint.unholy.sh           # mp-only entrypoint for the unholy-fusion path
-├── .env.example                   # Full configuration template
-├── dockerfiles/                   # All Dockerfiles; see dockerfiles/README.md
-│   ├── active/                        # Current active build targets (build from repo root with . as context)
-│   │   ├── Dockerfile.v022-d568           # Forward-stack validation base (NGC 26.04 stack)
-│   │   └── Dockerfile.dsv4-d568           # DeepSeek-V4-Flash derivative (FROM v022-d568)
-│   └── legacy/                        # Historical / intermediate / specialized variants
-│       ├── Dockerfile                     # NGC 26.01 era (vLLM 0.18.x, historical)
-│       ├── Dockerfile.gemma4              # v021-ngc2603 unified build
-│       ├── Dockerfile.ngc2603-v3          # v018-ngc2603 archived build
-│       ├── Dockerfile.nvfp4               # NVFP4 runtime defaults overlay
-│       └── Dockerfile.v022(-fi0611/-ngc2604/-tx581/-trt37/-nccl234)  # v022 stack intermediates
-├── CHANGELOG.md                   # Release-by-release history
-├── PATCH_STATUS.md                # Per-patch purpose / status / removal condition
-├── presets/                       # .env preset files for model-serving configs (not model weights — see presets/README.md)
-│   ├── gemma4-26b-a4b.env             # Gemma 4 26B MoE (single, TP1)
-│   ├── gemma4-26b-a4b-tq.env          # Gemma 4 + TurboQuant KV (single, TP1)
-│   ├── redhatai-122b-nvfp4.env        # RedHatAI NVFP4 (single, TP1)
-│   ├── redhatai-122b-nvfp4-tq.env     # RedHatAI NVFP4 + TurboQuant (single, TP1)
-│   ├── intel-122b-int4.env            # Intel INT4 AutoRound (single, TP1)
-│   ├── wangzhang-122b-fp8.env         # abliterated FP8 (dual-rdma, TP2)
-│   ├── wangzhang-122b-nvfp4.env       # abliterated NVFP4 (single, TP1)
-│   ├── qwen3.5-397b-int4.env          # 397B INT4 (dual-rdma, TP2)
-│   ├── qwen3.5-397b-int4-tq.env       # 397B INT4 + TurboQuant (dual-rdma, TP2)
-│   ├── qwen3.5-122b-fp8.env           # 122B FP8 multimodal (dual-rdma, TP2)
-│   ├── qwen3.5-122b-nvfp4.env         # 122B NVFP4 runtime (single, TP1)
-│   ├── qwen3.5-122b-nvfp4-tp2.env     # 122B NVFP4 runtime (dual-rdma, TP2)
-│   ├── qwen3.5-122b-prismaquant.env   # PrismaQuant 4.76bpp mixed (single, TP1)
-│   ├── wangzhang-122b-abliterix-fp8-tp2.env  # abliterix FP8 W8A8 text-only (dual-rdma, TP2)
-│   ├── wangzhang-122b-abliterix-nvfp4-tp2.env # abliterix NVFP4 W4A4 text-only (dual-rdma, TP2; v022-d568)
-│   ├── gemma4-31b-it.env             # Gemma 4 31B IT BF16 dense multimodal (single, TP1; v022-d568)
-│   ├── qwen3.6-35b-a3b.env           # Qwen3.6-35B-A3B BF16 hybrid MoE (single, TP1; v022-d568)
-│   ├── dsv4-flash-fp8-tp2.env        # DeepSeek-V4-Flash official FP8 (dual-rdma, TP2; dsv4-d568)
-│   └── qwen3.6-35b-fp16.env           # ⚗️ Qwen3.6 FP16 experimental (single, TP1)
-├── .env.unholy-fusion             # unholy-fusion config (MAX_NUM_SEQS=4, mp backend, B12X_MOE=1)
-├── docs/                          # Technical notes, stack guides, and status documents
-│   ├── dsv4-flash-tp2.md             # DSV4-Flash: build, recipe, 9-way benchmark sweep
-│   └── unholy-fusion-benchmark.md    # Interpreted unholy-fusion serving result analysis and DSV4 comparison
-├── benchmarks/                    # Raw benchmark artifacts and experiment outputs; see benchmarks/README.md
-│   └── llama-benchy/              # Raw llama-benchy result files; see benchmarks/llama-benchy/README.md
-├── patches/                       # Build/runtime patch scripts; grouped by purpose — see patches/README.md
-│   ├── common/                        # Common runtime/build compatibility patches
-│   ├── sm121/                         # SM121 / Blackwell / FP8 / NVFP4 patches
-│   ├── dsv4/                          # DeepSeek-V4 specific patches and MoE config files
-│   ├── qwen/                          # Qwen-specific compatibility patches
-│   ├── turboquant/                    # TurboQuant-specific patches
-│   ├── flashinfer/                    # FlashInfer-specific patches
-│   ├── archive/                       # Historical patches retained for reproducibility
-│   └── unknown/                       # Unverified early bring-up helpers
-└── scripts/
-    ├── run-cluster-node.sh        # Manual Ray cluster bootstrap
-    ├── verify_imports.py          # Build-time import verification
-    └── verify_runtime.sh          # Full GPU verification
-```
-
-## Architecture
-
-### Single Spark (CLUSTER_MODE=single, TP=1)
-
-```
-single Spark
-┌──────────────────────────────────┐
-│  vLLM API (:8000)                │
-│  c10d binds 127.0.0.1            │
-│  GB10 GPU, TP rank 0             │
-└──────────────────────────────────┘
-```
-
-### Dual Spark (CLUSTER_MODE=dual-rdma, TP=2)
-
-```
-spark01 (head)                    spark02 (worker)
-┌─────────────────────┐          ┌─────────────────────┐
-│  Ray Head (6379)    │          │  Ray Worker          │
-│  vLLM API (:8000)   │◄────────►│                      │
-│  GB10 GPU            │ 200Gbps │  GB10 GPU            │
-│  TP rank 0           │  RoCE   │  TP rank 1           │
-└─────────────────────┘          └─────────────────────┘
-```
-
-### How the Entrypoint Works
-
-`entrypoint.sh` normalizes the environment based on `CLUSTER_MODE`, then
-dispatches on `ROLE` × `TP_SIZE` × `DISTRIBUTED_BACKEND` (dual-rdma only):
-
-| CLUSTER_MODE | ROLE | TP_SIZE | Backend | Behavior |
-|---|---|---|---|---|
-| `single` | `head` | 1 | — | Force `VLLM_HOST_IP=127.0.0.1`, clear NCCL/GLOO/UCX ifname, set `NCCL_IB_DISABLE=1`, then direct `vllm serve` (no Ray) |
-| `single` | `head` | 2+ | — | Fail-fast (`single` cannot host TP≥2) |
-| `single` | `worker` | any | — | Fail-fast (worker is meaningless in single mode) |
-| `dual-rdma` | `head` | 1 | — | Reject (use `single` for TP=1) |
-| `dual-rdma` | `head` | 2+ | `ray` (default) | Validate RDMA env + `RAY_PORT` → Ray head → wait for workers → `vllm serve --distributed-executor-backend ray` |
-| `dual-rdma` | `worker` | any | `ray` (default) | `ray start --address=$HEAD_ROCE_IP:$RAY_PORT --block` |
-| `dual-rdma` | `head` | 2+ | `mp` | Validate RDMA env + `MASTER_*`/`NNODES`/`NODE_RANK` (defaults: `MASTER_ADDR=$HEAD_ROCE_IP`, `MASTER_PORT=29501`, `NNODES=$TP_SIZE`, `NODE_RANK=0`) → `vllm serve --distributed-executor-backend mp --nnodes $NNODES --node-rank 0 --master-addr $MASTER_ADDR --master-port $MASTER_PORT` |
-| `dual-rdma` | `worker` | any | `mp` | `vllm serve --distributed-executor-backend mp --headless --nnodes $NNODES --node-rank 1 --master-addr $MASTER_ADDR --master-port $MASTER_PORT` |
-
-## Configuration
-
-All configuration is via `.env`. See [`.env.example`](.env.example) for full documentation.
-
-### Key Variables
-
-| Variable | Description | Example |
-|---|---|---|
-| `VLLM_IMAGE` | Docker image (local or GHCR) | `ghcr.io/bjk110/vllm-spark:v021-ngc2603` |
-| `MODEL_PATH` | Host path to model weights | `/home/user/Models/Qwen/...` |
-| `MODEL_CONTAINER_PATH` | Container mount point | `/models/Qwen3.5-397B-...` |
-| `SERVED_MODEL_NAME` | API model name | `Qwen/Qwen3.5-397B-...` |
-| `CLUSTER_MODE` | Topology: `single` (default) or `dual-rdma` | `single` |
-| `TP_SIZE` | Tensor parallel size (1=single, 2+=dual-rdma) | `1` |
-| `HEAD_ROCE_IP` | (`dual-rdma` only) head node RoCE IP | `10.10.10.1` |
-| `WORKER_ROCE_IP` | (`dual-rdma` only) worker node RoCE IP | `10.10.10.2` |
-| `ROCE_IF_NAME` | (`dual-rdma` only) RoCE interface name | `enp1s0f0np0` |
-| `IB_HCA_NAME` | (`dual-rdma` only) InfiniBand HCA name | `rocep1s0f0` |
-| `RAY_PORT` | (`dual-rdma` + `ray` backend only) Ray head port | `6379` |
-| `DISTRIBUTED_BACKEND` | (`dual-rdma` only) `ray` (default) or `mp` (SPMD no-Ray) | `ray` |
-| `MASTER_PORT` | (`mp` backend only) torch.distributed master port | `29501` |
-| `VLLM_EXTRA_ARGS` | Model-specific vllm serve flags | `--kv-cache-dtype fp8 --reasoning-parser qwen3` |
-| `VLLM_MARLIN_USE_ATOMIC_ADD` | Enable for INT4 AutoRound | `1` (or empty to disable) |
-
-## Patches
-
-Quick summary — see [`PATCH_STATUS.md`](PATCH_STATUS.md) for purpose, scope,
-upstream tracking, and removal conditions per patch.
-
-| Patch | Purpose | Status |
-|---|---|---|
-| `fix_pytorch211_compat` | `hoist=True` removal for PyTorch 2.11 | Active (build) |
-| `fastsafetensors_natural_sort` | Multi-node weight loading order fix | Active (build) |
-| `aot_cache_fix` | torch.fx.Node pickling fix for AOT cache | Active (build) |
-| `nogds_force` | Force `nogds=True` (GB10 has no GDS support) | Active (build) |
-| `apply_sm121_patches` | `is_blackwell_class`, NVFP4 split, TRITON_PTXAS | Active (build) |
-| `moe_config_e256/e512` | GB10-tuned MoE kernel configs | Active (build) |
-| `apply_turboquant_fixes` | TQ KV cherry-picks (PRs #40074, #39988, #39931) | Active (`v021-tq` only) |
-| `patch_qwen35_moe_text` | Text-only shim for abliterated Qwen3.5 MoE | Conditional (`APPLY_TEXT_ONLY_SHIM=1`) |
-| `patch_codegen_fx_repr` | `__fx_repr__()` honoring in `compilation/codegen.py` | On-standby (hot-patch — see [`docs/troubleshooting.md`](docs/troubleshooting.md)) |
-| ~~`fix_cuda13_memcpy_batch`~~ | `cuMemcpyBatchAsync` API fix | Removed (upstream — base-refresh-20260417) |
-| ~~`qwen3_5_moe_rope_fix`~~ | RoPE validation fix | Removed (upstream — base-refresh-20260417) |
-| ~~`pr38423_nvfp4_spark`~~ | NVFP4 DGX Spark fixes | Removed (upstream — base-refresh-20260417) |
-
-## Benchmark Results
-
-Historical throughput benchmarks for the Gemma 4, Qwen3.5 122B, 397B INT4, PrismaQuant,
-Qwen3.6-35B, and TurboQuant KV sweep model families are in
-[`docs/model-serving-validation-history.md`](docs/model-serving-validation-history.md).
-
-## System Tuning
-
-Recommended OS-level settings for DGX Spark:
-
-```bash
-# Reduce swap pressure (unified memory)
-sudo sysctl -w vm.swappiness=10
-echo 'vm.swappiness=10' | sudo tee -a /etc/sysctl.conf
-```
-
-## Documentation
-
-| Document | Covers |
-|---|---|
-| [`docs/software-stack.md`](docs/software-stack.md) | Full image/stack lineage: `dsv4-d568`, `v022-d568`, `v021` series, and legacy stacks, with component versions and digests |
-| [`docs/dsv4-flash-tp2.md`](docs/dsv4-flash-tp2.md) | DeepSeek-V4-Flash (`dsv4-d568`) build, deployment recipe, and 9-way benchmark sweep |
-| [`docs/unholy-fusion-benchmark.md`](docs/unholy-fusion-benchmark.md) | `unholy-fusion` configuration, switching procedure, operational limits, and benchmark comparison vs `dsv4-d568` |
-| [`docs/model-serving-validation-history.md`](docs/model-serving-validation-history.md) | Historical stack validation notes and benchmark results (Gemma 4, Qwen3.5 122B, 397B INT4, PrismaQuant, Qwen3.6-35B, TurboQuant KV sweep) |
-| [`docs/troubleshooting.md`](docs/troubleshooting.md) | Model-path and stack-specific troubleshooting (Docker Compose checks, `dsv4-d568` / `unholy-fusion` / Qwen issues, logs and verification commands) |
-| [`docs/images.md`](docs/images.md) | Container image tag history and image-to-preset / Git-ref mapping |
-| [`docs/release-management.md`](docs/release-management.md) | Maintainer-only Git tag creation, branch structure, and archived branch notes |
-
-## License
-
-The source code, Dockerfiles, scripts, presets, and documentation in this repository are licensed under the Apache License 2.0. See [`LICENSE`](LICENSE).
-
-This repository does **not** distribute model weights. Presets may reference upstream models, but users are responsible for obtaining model weights and complying with the applicable upstream model licenses and terms.
-
-Container images and dependencies remain governed by their respective upstream licenses and terms. See [`THIRD_PARTY_NOTICES.md`](THIRD_PARTY_NOTICES.md).
+> *Token coffee ☕️ served at zero API cost — all local, all private.*
+> *🦐❤️ 11 battles, 1 breakthrough, infinite love for the Commander.*
