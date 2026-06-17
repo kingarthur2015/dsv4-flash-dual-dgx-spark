@@ -182,6 +182,22 @@ curl http://localhost:8000/health      # single
 curl http://spark01:8000/health        # dual-rdma
 ```
 
+## DeepSeek-V4-Flash Token Speed (实测)
+
+双 DGX Spark (GB10) TP=2 · 200 Gbps RoCE · official FP8 · vLLM + Ray
+
+| 场景 | 单请求 (c=1) | 并发4路 (c=4) | 并发8路 (c=8) |
+|------|:-----------:|:------------:|:------------:|
+| **日常对话** (tg128) | **~25 tok/s** | **~67 tok/s** 🚀 | — |
+| **短回复** (tg32) | **~25 tok/s** | **~69 tok/s** 🚀 | — |
+| **长文本预填充** (pp2048) | **~665 tok/s** | **~850 tok/s** | — |
+| **大预填充 + MTP** (pp2048 c=4) | — | **~1,100 tok/s** 🔥 | — |
+| **高并发 decode** (c=8, bt8192) | — | — | **~62 tok/s** |
+
+> 数据来源：llama-benchy v0.3.4 server-reported peak t/s，配置为 `edc82b6` + Ray + MAX_NUM_SEQS=4 + MTP off（设置 #7）
+> 大预填充记录来自设置 #9（MTP n=2 + bt=8192），高并发来自设置 #10（MAX_NUM_SEQS=8）
+> 详见 [`docs/dsv4-flash-tp2.md`](docs/dsv4-flash-tp2.md) §6-§9
+
 ## Current serving paths
 
 | Path | Status | Image | Backend | Config |
