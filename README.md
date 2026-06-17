@@ -153,23 +153,22 @@ curl http://localhost:8000/v1/chat/completions \
 
 ---
 
-## ⚡ Token 输出速度 (详细基准测试)
+## ⚡ Token 输出速度 · 实测
 
 双 DGX Spark (GB10) TP=2 · 200 Gbps RoCE · official FP8 · vLLM + Ray
 
-| 场景 | 单请求 (c=1) | 并发4路 (c=4) | 并发8路 (c=8) |
-|------|:-----------:|:------------:|:------------:|
-| **日常对话** (tg128) | **~25 tok/s** | **~67 tok/s** 🚀 | — |
-| **短回复** (tg32) | **~25 tok/s** | **~69 tok/s** 🚀 | — |
-| **长文本预填充** (pp2048) | **~665 tok/s** | **~850 tok/s** | — |
-| **大预填充 + MTP** (pp2048 c=4) | — | **~1,100 tok/s** 🔥 | — |
-| **高并发 decode** (c=8, bt8192) | — | — | **~62 tok/s** |
+| 场景 | 速度 |
+|------|:----:|
+| **日常对话** (单请求, ~400 tokens 输出) | **~14 tok/s** |
+| **短回复** (tg32 并发4路) | **~69 tok/s** (benchmark 峰值) |
+| **长回复** (tg128 并发4路) | **~67 tok/s** (benchmark 峰值) |
+| **长文本预填充** (pp2048 并发4路) | **~850 tok/s** (benchmark 峰值) |
+| **大预填充 + MTP** (pp2048 c=4) | **~1,100 tok/s** 🔥 (benchmark 峰值) |
 
-> 数据来源：llama-benchy v0.3.4 server-reported peak t/s
-> 推荐配置 **#7**: `edc82b6` + Ray + MAX_NUM_SEQS=4 + MTP off（日常对话峰值 ~67 tok/s @ c=4）
-> 大预填充 + MTP 配置 **#9**: `edc82b6` + Ray + MTP n=2 + `MAX_NUM_BATCHED_TOKENS=8192`（prefill ~1,100 tok/s）
-> 高并发配置 **#10**: 同上 + MAX_NUM_SEQS=8（decode ~62 tok/s @ c=8）
-> 完整 benchmark 数据及 9 种配置对比见 [`docs/dsv4-flash-tp2.md`](docs/dsv4-flash-tp2.md) §6-§9
+> **日常实测**：~14 tok/s（单请求 ~400 tokens，29s 完成）
+> **Benchmark 峰值**：llama-benchy v0.3.4 server-reported peak t/s（空载压测，实际使用受并发和上下文长度影响）
+> 配置: `edc82b6` + Ray + MAX_NUM_SEQS=4 + MTP off（配置 #7, peak decode ~67 tok/s @ c=4）
+> 详见 [`docs/dsv4-flash-tp2.md`](docs/dsv4-flash-tp2.md) §6-§9
 
 ---
 
@@ -178,7 +177,7 @@ curl http://localhost:8000/v1/chat/completions \
 | Metric · 指标 | Value · 值 |
 |--------------|-----------|
 | **Model 模型** | DeepSeek V4 Flash |
-| **Context length · 上下文长度** | **8,192 tokens** (max_model_len) |
+| **Context length · 上下文长度** | **262,144 (256K)** |
 | **Throughput · 推理速度** | **~11–13 tok/s** (short output, single request) |
 | Weights loaded · 权重 | 74.02 GiB per node |
 | **KV Cache blocks** | **16,110** blocks × **256 tok/block** (fp8) |
